@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/herolte_gl.c b/bsd/dev/herolte_gl.c
 --- a/bsd/dev/herolte_gl.c
 +++ b/bsd/dev/herolte_gl.c
-@@ -49,6 +49,9 @@ uint64_t
+@@ -49,9 +49,12 @@ uint64_t
  herolte_gl_dyld_flags(void)
  {
  	bool app = false;
@@ -14,7 +14,7 @@ diff --git a/bsd/dev/herolte_gl.c b/bsd/dev/herolte_gl.c
  	if (!app && (hgl_pid < 0 || proc_selfpid() != hgl_pid) && (hgl_sb_pid < 0 || proc_selfpid() != hgl_sb_pid)) {
  		return 0;
  	}
-@@ -138,6 +141,7 @@ herolte_gl_env(const char *path, int pid, const char **extra, int max)
+@@ -138,7 +141,8 @@ herolte_gl_env(const char *path, int pid, const char **extra, int max)
  		vnode_t appvp = NULLVP;
  		if (vnode_lookup(HGL_APP_LIB, 0, &appvp, vfs_context_kernel()) == 0) {
  			vnode_put(appvp);
