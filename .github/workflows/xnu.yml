@@ -19,7 +19,7 @@ on:
         description: GitHub runner image (empty = macos-15-intel)
         default: ""
   push:
-    branches: [main, herolte, codex/a5xelte-bringup]
+    branches: [main, herolte, hero2lte, codex/a5xelte-bringup]
     paths:
       - "xnu/patches/**"
       - ".github/workflows/xnu.yml"
