@@ -154,12 +154,19 @@ install(void)
    }
    void *core_image = dlopen("/System/Library/Frameworks/CoreImage.framework/CoreImage", RTLD_LAZY);
    id *key = core_image ? dlsym(core_image, "kCIContextUseSoftwareRenderer") : NULL;
+   if (key == NULL) {
+      key = (id *)dlsym(RTLD_DEFAULT, "kCIContextUseSoftwareRenderer");
+   }
+   /* Don't gate the hook on dlsym: if the key symbol won't resolve, use its literal value @"software_renderer". */
+   ci_software_key = key != NULL ? *key
+      : ((id (*)(id, SEL, const char *))objc_msgSend)((id)objc_getClass("NSString"),
+           sel_registerName("stringWithUTF8String:"), "software_renderer");
    Method init = class_getInstanceMethod(objc_getClass("CIContext"), sel_registerName("initWithOptions:"));
-   if (key != NULL && init != NULL) {
-      ci_software_key = *key;
+   if (init != NULL) {
       ci_init_original = (id (*)(id, SEL, id))method_setImplementation(init, (IMP)ci_init);
    }
-   herodrm_log("%s: libheroapp: CoreImage %s", getprogname(), ci_init_original ? "in software" : "as it was");
+   herodrm_log("%s: libheroapp: CoreImage %s (key %s)", getprogname(),
+      ci_init_original ? "in software" : "as it was", key != NULL ? "sym" : "literal");
    Method assertion = class_getInstanceMethod(objc_getClass("NSAssertionHandler"),
       sel_registerName("handleFailureInMethod:object:file:lineNumber:description:"));
    if (assertion != NULL) {
