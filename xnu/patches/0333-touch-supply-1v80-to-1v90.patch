@@ -1,0 +1,41 @@
+hero2lte touch: accept tsp_io (LDO32) at 1.80-1.90 V.
+
+After a cold start or a forced restart LDO32 comes up at 1.80 V (0x2c)
+instead of 1.85 V (0x2e); the exact check left the touch IC unpowered.
+
+diff --git a/bsd/dev/herolte_touch.c b/bsd/dev/herolte_touch.c
+--- a/bsd/dev/herolte_touch.c
++++ b/bsd/dev/herolte_touch.c
+@@ -97,6 +97,14 @@
+ #define S2MPS16_L33CTRL 0x5d    /* tsp_avdd: 1.8 V + 25 mV * sel */
+ #define S2MPS16_SEL_1V85 0x2e
+ #define S2MPS16_SEL_3V3 0x3c
++/*
++ * tsp_io comes up at 1.85 V after a reboot from TWRP or Android but at
++ * 1.80 V (0x2c) after a cold start or a forced restart (Power+Home+Vol
++ * Down): both are fine for the touch IC's I/O (patch 0333).
++ */
++#define S2MPS16_SEL_1V80 0x2c
++#define S2MPS16_SEL_1V90 0x30
++#define S2MPS16_L32_OK(v) (((v) & 0x3fu) >= S2MPS16_SEL_1V80 && ((v) & 0x3fu) <= S2MPS16_SEL_1V90)
+ #define S2MPS16_ENABLE  0xc0u
+ 
+ static vm_offset_t ht_alive, ht_pins, ht_i2c, ht_pm;
+@@ -357,7 +365,7 @@
+ 		return false;
+ 	}
+ 	printf("HEROLTE PMIC: S2MPS16 id=%#x L32CTRL=%#x L33CTRL=%#x\n", id, l32, l33);
+-	if ((l32 & 0x3fu) != S2MPS16_SEL_1V85 || (l33 & 0x3fu) != S2MPS16_SEL_3V3) {
++	if (!S2MPS16_L32_OK(l32) || (l33 & 0x3fu) != S2MPS16_SEL_3V3) {
+ 		printf("HEROLTE PMIC: unexpected LDO32/33 voltage, leaving them off\n");
+ 		return false;
+ 	}
+@@ -660,7 +668,7 @@
+ 		return false;
+ 	}
+ 	printf("HEROLTE APM: S2MPS16 id=%#x L32CTRL=%#x L33CTRL=%#x\n", id, l32, l33);
+-	if ((l32 & 0x3fu) != S2MPS16_SEL_1V85 || (l33 & 0x3fu) != S2MPS16_SEL_3V3) {
++	if (!S2MPS16_L32_OK(l32) || (l33 & 0x3fu) != S2MPS16_SEL_3V3) {
+ 		printf("HEROLTE APM: unexpected LDO32/33 voltage, leaving them off\n");
+ 		return false;
+ 	}
