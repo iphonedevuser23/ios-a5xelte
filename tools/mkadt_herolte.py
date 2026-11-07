@@ -30,6 +30,11 @@ def set_prop(node, name, value):
     node.props.append((name, 0, value))
 
 
+# Settings > About (--product-name, --model-number, --region, --serial). The serial is the phone's own: pass it on
+# the command line, keep it out of git.
+IDENTITY = {'product_name': 'Galaxy S7 edge', 'model_number': 'SM-G935F', 'region': '', 'serial': ''}
+
+
 def child(node, name):
     for candidate in node.children:
         if candidate.prop('name') == mkadt.cstr(name):
@@ -97,6 +102,18 @@ def build(canvas=(FB_WIDTH, FB_HEIGHT), dram=(DRAM_BASE, DRAM_SIZE), scale=3):
     # into 10-bit 'w30r'/'b3a8' surfaces, which CoreAnimation over our OpenGL ES
     # never shows (Safari's pages and the stock wallpapers black, boot-0317).
     set_prop(child(root, 'product'), 'artwork-display-gamut', mkadt.cstr('sRGB'))
+    # What Settings > General > About shows. On an iPhone iBoot fills these from syscfg (root serial-number,
+    # model-number, region-info: 0x20 bytes, zero padded); /product product-name is the Model Name.
+    product = child(root, 'product')
+    set_prop(product, 'product-name', mkadt.cstr(IDENTITY['product_name']))
+    set_prop(product, 'product-description', mkadt.cstr(IDENTITY['product_name']))
+    pad = lambda text: text.encode()[:31].ljust(32, b'\0')
+    for key in ('serial-number', 'mlb-serial-number'):
+        if IDENTITY['serial']:
+            set_prop(root, key, pad(IDENTITY['serial']))
+    set_prop(root, 'model-number', pad(IDENTITY['model_number']))
+    set_prop(root, 'region-info', pad(IDENTITY['region']))
+    set_prop(root, 'regulatory-model-number', pad(IDENTITY['model_number']))
     cpus = child(root, 'cpus')
     cpu0 = child(cpus, 'cpu0')
     # S-Boot starts on the Cortex-A53 "Apollo" cluster: MPIDR 0x100..0x103
@@ -192,11 +209,17 @@ if __name__ == '__main__':
                              'vm_compression_limit=98304), 2048 panics in write_pte_fast')
     parser.add_argument('--scale2', action='store_true',
                         help='iPhone XR screen, 828x1792 @2x (needs research/ipsw-x/d22ap.adt)')
+    parser.add_argument('--product-name', default=IDENTITY['product_name'])
+    parser.add_argument('--model-number', default=IDENTITY['model_number'])
+    parser.add_argument('--region', default=IDENTITY['region'])
+    parser.add_argument('--serial', default='', help="the phone's serial (Settings > About); not stored in git")
     parser.add_argument('--iphone8', action='store_true',
                         help='iPhone 8 screen, 750x1334 @2x, with a home button')
     args = parser.parse_args()
     canvas = tuple(int(v) for v in args.canvas.lower().split('x'))
     dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
+    IDENTITY.update(product_name=args.product_name, model_number=args.model_number, region=args.region,
+                    serial=args.serial)
     blob = adt.serialize(build(canvas, dram, 8 if args.iphone8 else 2 if args.scale2 else 3))
     args.output.write_bytes(blob)
     print(f'{args.output}: {len(blob)} bytes')

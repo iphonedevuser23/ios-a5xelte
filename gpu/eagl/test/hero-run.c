@@ -501,14 +501,41 @@ remove_ls_db_once(void)
  */
 #define MG_CACHE_GONE DROP_DIR "mgcache.gone"
 
+/*
+ * Again whenever the drop zone carries a new token: DROP_DIR mgcache.reset holds any text (tools put a fresh one in
+ * when the ADT's identity or screen changes); when it differs from what mgcache.gone holds, the cache goes again and
+ * mgcache.gone takes the token. Without mgcache.reset, once, as before.
+ */
+#define MG_CACHE_RESET DROP_DIR "mgcache.reset"
+
+static size_t
+read_small(const char *path, char *buf, size_t size)
+{
+   int fd = open(path, O_RDONLY);
+   if (fd < 0)
+      return 0;
+   ssize_t n = read(fd, buf, size);
+   close(fd);
+   return n > 0 ? (size_t)n : 0;
+}
+
 static void
 remove_mg_cache_once(void)
 {
    const char *groups = "/private/var/containers/Shared/SystemGroup";
    int removed = 0;
-   if (access(MG_CACHE_GONE, F_OK) == 0)
+   char want[128] = {0}, had[128] = {0};
+   size_t nwant = read_small(MG_CACHE_RESET, want, sizeof(want) - 1);
+   size_t nhad = read_small(MG_CACHE_GONE, had, sizeof(had) - 1);
+   if (access(MG_CACHE_GONE, F_OK) == 0 && (nwant == 0 || (nwant == nhad && memcmp(want, had, nwant) == 0)))
       return;
-   close(open(MG_CACHE_GONE, O_WRONLY | O_CREAT, 0644));
+   int fd = open(MG_CACHE_GONE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+   if (fd >= 0) {
+      if (nwant)
+         (void)write(fd, want, nwant);
+      close(fd);
+   }
+   herodrm_log("hero-run: MobileGestalt cache reset (token %s)", nwant ? "new" : "none, first time");
    DIR *d = opendir(groups);
    struct dirent *e;
    while (d && (e = readdir(d))) {
