@@ -1,0 +1,99 @@
+hero2lte: passcode, step 1: answer the passcode selectors and log them.
+
+libaks selectors (iOS 16.7.16): 8/32 lock device, 15 change secret, 42 verify
+password, 69 se set secret, 105 change secret epilogue (9, 12 unlock). With
+heropasscode=1 (default) they succeed, so any passcode is accepted and nothing
+can lock the phone out; each call is logged with its input, to learn the format.
+
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -31,6 +31,7 @@
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <libkern/c++/OSString.h>
+ #include <sys/proc.h>
++#include <pexpert/pexpert.h>
+ 
+ /* libaks selectors (AppleKeyStore.framework, iOS 16.7). */
+ enum {
+@@ -241,6 +242,55 @@
+ 	       (uint32_t)args->structureOutputDescriptor->getLength() : args->structureOutputSize;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++/*
++ * Passcode, step 1 (patch 0337): iOS sets and checks a passcode through these libaks selectors (iOS 16.7.16,
++ * read off AppleKeyStore.framework's aks_* functions): 8 and 32 aks_lock_device, 15 aks_change_secret(_se),
++ * 42 aks_verify_password, 69 aks_se_set_secret, 105 aks_change_secret_epilogue; 9 aks_unlock_device and 12
++ * aks_unlock_bag were already answered. heropasscode=1 (default) answers all of them with success, which accepts
++ * any passcode, so nothing can lock the phone, and logs every call with its scalars and the first bytes of its
++ * input, to learn how the passcode travels. heropasscode=0: as before (8, 15 ... unsupported).
++ */
++static int sweet_aks_passcode = -1;
++static uint32_t sweet_aks_dumps;
++
++static bool
++sweet_aks_passcode_selector(uint32_t selector)
++{
++	return selector == 8 || selector == 32 || selector == 15 || selector == 42 || selector == 69 ||
++	       selector == 105 || selector == kAKSUnlockDevice || selector == kAKSUnlockBag;
++}
++
++static void
++sweet_aks_dump(const char *who, uint32_t selector, IOExternalMethodArguments *args)
++{
++	uint8_t buf[96];
++	char hex[3 * sizeof(buf) + 1];
++	uint32_t total = args->structureInputDescriptor != NULL ?
++	    (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
++	uint32_t n = total < sizeof(buf) ? total : (uint32_t)sizeof(buf);
++
++	if (n) {
++		if (args->structureInputDescriptor != NULL) {
++			args->structureInputDescriptor->readBytes(0, buf, n);
++		} else {
++			memcpy(buf, args->structureInput, n);
++		}
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		snprintf(hex + 3 * i, 4, "%02x ", buf[i]);
++	}
++	hex[3 * n] = 0;
++	IOLog("HEROLTE AKS: %s sel %u scalars %u [%#llx %#llx %#llx %#llx] struct %u out %u/%u: %s\n", who, selector,
++	    args->scalarInputCount, args->scalarInputCount > 0 ? args->scalarInput[0] : 0,
++	    args->scalarInputCount > 1 ? args->scalarInput[1] : 0, args->scalarInputCount > 2 ? args->scalarInput[2] : 0,
++	    args->scalarInputCount > 3 ? args->scalarInput[3] : 0, total, args->scalarOutputCount,
++	    args->structureOutputDescriptor != NULL ? (uint32_t)args->structureOutputDescriptor->getLength() :
++	    args->structureOutputSize, hex);
++	bzero(buf, sizeof(buf));
++}
++#endif /* ARM64_BOARD_CONFIG_HEROLTE */
++
+ IOReturn
+ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+@@ -254,6 +304,24 @@
+ 	uint32_t out_struct = sweet_aks_struct_out_size(args);
+ 	uint64_t arg0 = in_scalars > 0 ? args->scalarInput[0] : 0;
+ 
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++	if (sweet_aks_passcode < 0) {
++		int on = 1;
++		PE_parse_boot_argn("heropasscode", &on, sizeof(on));
++		sweet_aks_passcode = on;
++	}
++	if (sweet_aks_passcode && sweet_aks_passcode_selector(selector)) {
++		if (sweet_aks_dumps < 80) {
++			char who[32];
++			proc_selfname(who, sizeof(who));
++			sweet_aks_dumps++;
++			sweet_aks_dump(who, selector, args);
++		}
++		args->scalarOutputCount = 0;
++		return kIOReturnSuccess;
++	}
++#endif
++
+ 	switch (selector) {
+ 	case kAKSOpen:
+ 	case kAKSUnloadBag:
