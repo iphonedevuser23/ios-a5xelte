@@ -1,0 +1,80 @@
+hero2lte: log every lookup, create, delete and rename of a LaunchServices database (*.csstore).
+
+lsd rebuilds its database at every boot. Write down where it is looked
+for, whether the save works and who removes it (herocsstore=0: off).
+
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -84,6 +84,7 @@
+ #include <kern/kalloc.h>
+ #include <sys/filedesc.h>
+ #include <sys/proc_internal.h>
++#include <pexpert/pexpert.h>
+ #include <sys/kdebug.h>
+ #include <sys/unistd.h>         /* For _PC_NAME_MAX */
+ #include <sys/uio_internal.h>
+@@ -162,8 +163,63 @@
+  *		lookup: ???
+  *		VNOP_READLINK:???
+  */
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++/*
++ * hero2lte (patch 0331): lsd rebuilds the LaunchServices database at every
++ * boot (SpringBoard waits for it: the freeze of the first minutes). Write
++ * down every lookup, create, delete and rename of a "*.csstore" file, by
++ * whom and with what result, to see where the database is looked for,
++ * whether its save works and who takes it away. herocsstore=0: none.
++ */
++static int hero_namei_real(struct nameidata *ndp);
++static int hero_csstore_lines;
++
++int
++namei(struct nameidata *ndp)
++{
++	static int on = -1;
++	char path[256];
++	int error;
++
++	path[0] = 0;
++	if (on < 0) {
++		int v = 1;
++		PE_parse_boot_argn("herocsstore", &v, sizeof(v));
++		on = v;
++	}
++	if (on && hero_csstore_lines < 400 && ndp->ni_dirp != USER_ADDR_NULL) {
++		size_t done = 0;
++		if (UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
++			if (copyinstr(ndp->ni_dirp, path, sizeof(path), &done) != 0) {
++				path[0] = 0;
++			}
++		} else {
++			strlcpy(path, CAST_DOWN(const char *, ndp->ni_dirp), sizeof(path));
++		}
++		if (!strnstr(path, "csstore", sizeof(path))) {
++			path[0] = 0;
++		}
++	}
++	error = hero_namei_real(ndp);
++	if (path[0]) {
++		static const char *const ops[] = { "lookup", "create", "delete", "rename" };
++		char who[MAXCOMLEN + 1];
++		unsigned op = (unsigned)ndp->ni_cnd.cn_nameiop;
++
++		proc_selfname(who, sizeof(who));
++		hero_csstore_lines++;
++		printf("HEROLTE CSSTORE: %s[%d] %s %s -> %d%s\n", who, proc_selfpid(), op < 4 ? ops[op] : "?",
++		    path, error, (error == 0 && op == 1 && ndp->ni_vp == NULLVP) ? " (new)" : "");
++	}
++	return error;
++}
++
++static int
++hero_namei_real(struct nameidata *ndp)
++#else
+ int
+ namei(struct nameidata *ndp)
++#endif /* ARM64_BOARD_CONFIG_HEROLTE */
+ {
+ 	struct vnode *dp;       /* the directory we are searching */
+ 	struct vnode *usedvp = ndp->ni_dvp;  /* store pointer to vp in case we must loop due to
