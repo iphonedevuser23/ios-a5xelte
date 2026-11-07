@@ -931,8 +931,8 @@ main(void)
     */
    pthread_t widgets, jailbreak;
    int widgets_on = pthread_create(&widgets, NULL, widgets_to_background, NULL) == 0;
-   if (pthread_create(&jailbreak, NULL, install_jailbreak, NULL) == 0)
-      pthread_detach(jailbreak);
+   /* joined before any return: with no DROP_DIR test, main used to return at 20 s and took the thread with it */
+   int jailbreak_on = pthread_create(&jailbreak, NULL, install_jailbreak, NULL) == 0;
    sleep(20);
    load_env();
    posix_spawn_file_actions_t fa;
@@ -946,6 +946,10 @@ main(void)
    int err = posix_spawn(&pid, argv[0], &fa, NULL, argv, environ);
    if (err) {
       herodrm_log("hero-run: spawn %s: error %d", argv[0], err);
+      if (jailbreak_on)
+         pthread_join(jailbreak, NULL);
+      if (widgets_on)
+         pthread_join(widgets, NULL);
       return 1;
    }
    herodrm_log("hero-run: test started, pid %d", pid);
@@ -996,6 +1000,8 @@ main(void)
          close(open(DROP_DIR "database2.done", O_WRONLY | O_CREAT, 0644));
       }
    }
+   if (jailbreak_on)
+      pthread_join(jailbreak, NULL);
    if (widgets_on)
       pthread_join(widgets, NULL);      /* (for as long as the phone runs, unless widgets.fg) */
    return 0;

@@ -1,0 +1,73 @@
+hero2lte charger: read two bytes, never write on 0xff.
+
+Single-byte reads at 0x66 all came back 0xff and the blind writes went
+out every poll. Read as the gauge does (two bytes, keep the first), log a
+probe of both ways once, and leave the charger alone without real answers.
+
+diff --git a/bsd/dev/herolte_battery.c b/bsd/dev/herolte_battery.c
+--- a/bsd/dev/herolte_battery.c
++++ b/bsd/dev/herolte_battery.c
+@@ -216,8 +216,13 @@
+ #define CHG_CNFG_06     0xbd
+ #define CHG_CNFG_09     0xc0
+ 
++/*
++ * 0335: single-byte reads came back 0xff from every register with no error
++ * (boot-242994677), while the gauge's two-byte reads work. Read two bytes
++ * (the MFD auto-increments) and keep the first; 0xff counts as no answer.
++ */
+ static bool
+-chg_rd(uint8_t reg, uint8_t *v)
++chg_rd1(uint8_t reg, uint8_t *v)
+ {
+ 	bool ok;
+ 	i2c_slave = CHG_ADDR;
+@@ -227,6 +232,18 @@
+ }
+ 
+ static bool
++chg_rd(uint8_t reg, uint8_t *v)
++{
++	uint8_t b[2] = { 0xff, 0xff };
++	bool ok;
++	i2c_slave = CHG_ADDR;
++	ok = fg_message(false, &reg, 1, false) && fg_message(true, b, 2, true);
++	i2c_slave = FG_ADDR;
++	*v = b[0];
++	return ok && b[0] != 0xff;
++}
++
++static bool
+ chg_wr(uint8_t reg, uint8_t v)
+ {
+ 	uint8_t b[2] = { reg, v };
+@@ -249,7 +266,7 @@
+ {
+ 	static int mode = -1;
+ 	static unsigned in_ma = 1500, cc_ma = 1500, calls, fixes, failures;
+-	uint8_t c00, c02, c06, c09, d00 = 0, d01 = 0, d02 = 0;
++	uint8_t c00 = 0xff, c02 = 0xff, c06, c09 = 0xff, d00 = 0, d01 = 0, d02 = 0;
+ 
+ 	if (mode < 0) {
+ 		int m = 1;
+@@ -260,10 +277,19 @@
+ 		cc_ma = cc_ma < 100 ? 100 : (cc_ma > 2000 ? 2000 : cc_ma);
+ 		mode = m;
+ 	}
++	if (calls == 0) {
++		static const uint8_t regs[] = { 0x00, 0x01, CHG_DETAILS_00, CHG_CNFG_00, CHG_CNFG_02, CHG_CNFG_09 };
++		for (unsigned i = 0; i < sizeof(regs); i++) {
++			uint8_t one = 0xff, two = 0xff;
++			bool ok1 = chg_rd1(regs[i], &one), ok2 = chg_rd(regs[i], &two);
++			printf("HEROLTE CHG: probe reg %#x: one byte %#x (%d), two bytes %#x (%d)\n", regs[i], one, ok1, two, ok2);
++		}
++	}
+ 	if (!chg_rd(CHG_CNFG_00, &c00) || !chg_rd(CHG_CNFG_02, &c02) || !chg_rd(CHG_CNFG_09, &c09)) {
+ 		if (failures++ < 4) {
+-			printf("HEROLTE CHG: no answer at 0x66\n");
++			printf("HEROLTE CHG: no usable answer at 0x66 (CNFG_00=%#x 02=%#x 09=%#x); not writing\n", c00, c02, c09);
+ 		}
++		calls++;
+ 		return;
+ 	}
+ 	(void)chg_rd(CHG_DETAILS_00, &d00);
