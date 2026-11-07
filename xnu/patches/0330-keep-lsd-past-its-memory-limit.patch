@@ -1,0 +1,75 @@
+hero2lte: keep lsd past its fatal per-process memory limit.
+
+lsd rebuilds the LaunchServices database at every boot, crosses its
+fatal footprint limit before it finishes and is killed by jetsam, so the
+database is never saved; SpringBoard waits for lsd meanwhile (the 3-4
+minute UI freeze). herojetsam_keep= names the processes that keep running
+past that limit (default "lsd", "-" for none).
+
+diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
+--- a/bsd/kern/kern_memorystatus.c
++++ b/bsd/kern/kern_memorystatus.c
+@@ -4221,6 +4221,46 @@
+  * This is invoked for both advisory, non-fatal per-task high watermarks,
+  * as well as the fatal task memory limits.
+  */
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++/*
++ * hero2lte (patch 0330): lsd rebuilds the LaunchServices database at boot
++ * (it registers every system bundle) and crosses its fatal per-process
++ * limit before it is done: jetsam kills it, the database is never saved,
++ * the next boot rebuilds it again, and SpringBoard's main thread waits
++ * for lsd the whole time (the 3-4 minute UI freeze). Processes named in
++ * herojetsam_keep= (comma list, default "lsd"; "-" for none) keep
++ * running past that limit; system-wide memory pressure can still kill them.
++ */
++static char hero_jetsam_keep_names[128];
++static int hero_jetsam_keep_ready;
++
++static bool
++hero_jetsam_keep(proc_t p)
++{
++	const char *t, *end;
++	size_t n;
++
++	if (!hero_jetsam_keep_ready) {
++		if (!PE_parse_boot_argn("herojetsam_keep", hero_jetsam_keep_names, sizeof(hero_jetsam_keep_names))) {
++			strlcpy(hero_jetsam_keep_names, "lsd", sizeof(hero_jetsam_keep_names));
++		}
++		hero_jetsam_keep_ready = 1;
++	}
++	if (p == PROC_NULL || hero_jetsam_keep_names[0] == '-' || !*p->p_name) {
++		return false;
++	}
++	n = strlen(p->p_name);
++	for (t = hero_jetsam_keep_names; *t; t = *end ? end + 1 : end) {
++		for (end = t; *end && *end != ','; end++) {
++		}
++		if ((size_t)(end - t) == n && strncmp(t, p->p_name, n) == 0) {
++			return true;
++		}
++	}
++	return false;
++}
++#endif /* ARM64_BOARD_CONFIG_HEROLTE */
++
+ void
+ memorystatus_on_ledger_footprint_exceeded(boolean_t warning, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal)
+ {
+@@ -4244,6 +4284,16 @@
+ 	}
+ #endif /* VM_PRESSURE_EVENTS */
+ 
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++	if (memlimit_is_fatal && hero_jetsam_keep(p)) {
++		static int hero_jetsam_told;
++		if (hero_jetsam_told++ < 16) {
++			printf("HEROLTE JETSAM: %s[%d] is over its fatal memory limit (%s): kept running (herojetsam_keep)\n",
++			    p->p_name, proc_getpid(p), memlimit_is_active ? "active" : "inactive");
++		}
++		return;
++	}
++#endif /* ARM64_BOARD_CONFIG_HEROLTE */
+ 	if (memlimit_is_fatal) {
+ 		/*
+ 		 * If this process has no high watermark or has a fatal task limit, then we have been invoked because the task
