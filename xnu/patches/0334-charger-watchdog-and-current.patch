@@ -1,0 +1,142 @@
+hero2lte: drive the MAX77854 charger (watchdog, input limit, charge current).
+
+Under iOS nothing set the charger up: its watchdog ran out and it fell back
+to about 120 mA, less than iOS uses. Every battery poll now kicks the
+watchdog and keeps charging on with 1500 mA input / 1500 mA charge
+(herochg=0: log only; herochg_in=, herochg_cc= in mA).
+
+diff --git a/bsd/dev/herolte_battery.c b/bsd/dev/herolte_battery.c
+--- a/bsd/dev/herolte_battery.c
++++ b/bsd/dev/herolte_battery.c
+@@ -51,6 +51,7 @@
+ #define HSI2C_ADDR      0x70
+ 
+ static vm_offset_t fg_i2c, fg_pins;
++static uint8_t i2c_slave = FG_ADDR;     /* the gauge, or the charger (0334) */
+ 
+ static uint32_t
+ fg_rd(vm_offset_t base, uint32_t off)
+@@ -97,7 +98,7 @@
+ 
+ 	fg_wr(fg_i2c, HSI2C_INT_STAT, fg_rd(fg_i2c, HSI2C_INT_STAT));
+ 	fg_wr(fg_i2c, HSI2C_FIFO_CTL, 3u | (receive ? (1u << 4) : (1u << 16)));
+-	fg_wr(fg_i2c, HSI2C_ADDR, FG_ADDR << 10);
++	fg_wr(fg_i2c, HSI2C_ADDR, (uint32_t)i2c_slave << 10);
+ 	fg_wr(fg_i2c, HSI2C_CTL, 9u | (receive ? 0x40u : 0x80u));
+ 	fg_wr(fg_i2c, HSI2C_INT_EN, 0xf80u | (receive ? 0x42u : 1u));
+ 	/* Bit 16 read, bit 17 STOP_AFTER_TRANS, bit 31 MASTER_RUN. */
+@@ -195,10 +196,114 @@
+ 	return 0;
+ }
+ 
++/*
++ * Charger (patch 0334): the MAX77854's charger registers answer at 0x66 on
++ * the same bus (Samsung's max77854_charger.c, 8-bit slave 0xCC). Nothing set
++ * it up under iOS: its watchdog ran out and it went back to its defaults,
++ * about 120 mA into the battery, less than iOS uses. Every poll (30 s): kick
++ * the watchdog (CNFG_06 WDTCLR, protection unlocked as Samsung's driver does)
++ * and keep charging on (CNFG_00 CHG+BUCK), the input limit (CNFG_09 CHGIN_LIM,
++ * 33.3 mA steps) and the fast-charge current (CNFG_02 CHG_CC, 50 mA steps).
++ * Boot-args: herochg=0 only reads and logs, herochg_in=MA (default 1500),
++ * herochg_cc=MA (default 1500), both 100..2000.
++ */
++#define CHG_ADDR        0x66u
++#define CHG_DETAILS_00  0xb3
++#define CHG_DETAILS_01  0xb4
++#define CHG_DETAILS_02  0xb5
++#define CHG_CNFG_00     0xb7
++#define CHG_CNFG_02     0xb9
++#define CHG_CNFG_06     0xbd
++#define CHG_CNFG_09     0xc0
++
++static bool
++chg_rd(uint8_t reg, uint8_t *v)
++{
++	bool ok;
++	i2c_slave = CHG_ADDR;
++	ok = fg_message(false, &reg, 1, false) && fg_message(true, v, 1, true);
++	i2c_slave = FG_ADDR;
++	return ok;
++}
++
++static bool
++chg_wr(uint8_t reg, uint8_t v)
++{
++	uint8_t b[2] = { reg, v };
++	bool ok;
++	i2c_slave = CHG_ADDR;
++	ok = fg_message(false, b, 2, true);
++	i2c_slave = FG_ADDR;
++	return ok;
++}
++
++static uint8_t
++chgin_code(unsigned ma)
++{
++	unsigned q = ma / 100u, r = ma % 100u;
++	return (uint8_t)(q * 3u + (r >= 67u ? 2u : r >= 33u ? 1u : 0u));
++}
++
++static void
++herolte_chg_service(void)
++{
++	static int mode = -1;
++	static unsigned in_ma = 1500, cc_ma = 1500, calls, fixes, failures;
++	uint8_t c00, c02, c06, c09, d00 = 0, d01 = 0, d02 = 0;
++
++	if (mode < 0) {
++		int m = 1;
++		PE_parse_boot_argn("herochg", &m, sizeof(m));
++		PE_parse_boot_argn("herochg_in", &in_ma, sizeof(in_ma));
++		PE_parse_boot_argn("herochg_cc", &cc_ma, sizeof(cc_ma));
++		in_ma = in_ma < 100 ? 100 : (in_ma > 2000 ? 2000 : in_ma);
++		cc_ma = cc_ma < 100 ? 100 : (cc_ma > 2000 ? 2000 : cc_ma);
++		mode = m;
++	}
++	if (!chg_rd(CHG_CNFG_00, &c00) || !chg_rd(CHG_CNFG_02, &c02) || !chg_rd(CHG_CNFG_09, &c09)) {
++		if (failures++ < 4) {
++			printf("HEROLTE CHG: no answer at 0x66\n");
++		}
++		return;
++	}
++	(void)chg_rd(CHG_DETAILS_00, &d00);
++	(void)chg_rd(CHG_DETAILS_01, &d01);
++	(void)chg_rd(CHG_DETAILS_02, &d02);
++	if (calls++ % 10 == 0) {
++		printf("HEROLTE CHG: CNFG_00=%#x 02=%#x 09=%#x DETAILS %#x %#x %#x (herochg=%d, in %u mA, cc %u mA)\n",
++		    c00, c02, c09, d00, d01, d02, mode, in_ma, cc_ma);
++	}
++	if (mode == 0) {
++		return;
++	}
++	if (chg_rd(CHG_CNFG_06, &c06)) {
++		(void)chg_wr(CHG_CNFG_06, (uint8_t)(c06 | 0x0cu | 0x01u));
++	}
++	uint8_t w00 = (uint8_t)(c00 | 0x05u);
++	uint8_t w02 = (uint8_t)((c02 & ~0x3fu) | (cc_ma / 50u));
++	uint8_t w09 = (uint8_t)((c09 & ~0x7fu) | chgin_code(in_ma));
++	bool wrote = false;
++	if (w09 != c09) {
++		wrote |= chg_wr(CHG_CNFG_09, w09);
++	}
++	if (w02 != c02) {
++		wrote |= chg_wr(CHG_CNFG_02, w02);
++	}
++	if (w00 != c00) {
++		wrote |= chg_wr(CHG_CNFG_00, w00);
++	}
++	if (wrote && fixes++ < 16) {
++		printf("HEROLTE CHG: set CNFG_00 %#x->%#x, 02 %#x->%#x, 09 %#x->%#x\n", c00, w00, c02, w02, c09, w09);
++	}
++}
++
+ int
+ herolte_fg_read(unsigned *percent, unsigned *mv, int *ma, unsigned *rem_mah, unsigned *full_mah)
+ {
+ 	uint16_t soc, vcell, current, rem, full;
++	if (fg_i2c) {
++		herolte_chg_service();
++	}
+ 	if (!fg_i2c || !fg_word(FG_REPSOC, &soc) || !fg_word(FG_VCELL, &vcell) ||
+ 	    !fg_word(FG_CURRENT, &current) || !fg_word(FG_REPCAP, &rem) ||
+ 	    !fg_word(FG_FULLCAP, &full)) {
