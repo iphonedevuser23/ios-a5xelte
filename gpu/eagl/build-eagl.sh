@@ -52,8 +52,9 @@ $CC -O1 -g -Wno-deprecated-declarations -fno-objc-arc -I"$HERE/src" "$HERE/test/
 $CC -O2 -Wall -o "$OUT/hero-run" "$HERE/test/hero-run.c" -L "$OUT/lib" -ldrm.2 -lobjc -lz -framework Foundation \
   -Wl,-rpath,/private/var/herolte/lib
 
+# Self-contained like libheroapp: the @rpath/libdrm dependency never resolved (no LC_RPATH), so it never loaded.
 $CC -O2 -Wall -dynamiclib -o "$OUT/lib/libherosb.dylib" "$HERE/src/herosb.c" -install_name @rpath/libherosb.dylib \
-  -framework CoreFoundation -lobjc -L "$OUT/lib" -ldrm.2 -Wl,-rpath,/private/var/herolte/lib
+  -framework CoreFoundation -lobjc -Wl,-undefined,error
 
 # libheroapp must be self-contained: it is inserted into arbitrary apps, and a @rpath dependency on libdrm never
 # resolved (no LC_RPATH reached the binary), so it failed to load everywhere. herodrm_log is a local stub now.

@@ -8,7 +8,9 @@
 #include <dlfcn.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -17,7 +19,17 @@
 
 typedef struct { double x, y, w, h; } rect_t;
 
-extern void herodrm_log(const char *format, ...);
+/* Local stub: linking libdrm for herodrm_log added a @rpath/libdrm.2.dylib dependency with no LC_RPATH,
+ * so libherosb never loaded. SpringBoard gets no HERO_LOG_STDERR pump anyway, so stderr is fine here. */
+static void
+herodrm_log(const char *format, ...)
+{
+   va_list arguments;
+   va_start(arguments, format);
+   vfprintf(stderr, format, arguments);
+   va_end(arguments);
+   fputc('\n', stderr);
+}
 
 static id
 nsstring(const char *text)
