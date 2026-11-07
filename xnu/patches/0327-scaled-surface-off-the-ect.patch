@@ -1,0 +1,19 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 8836104..ba22235 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -285,9 +285,12 @@ AppleCLCD::start(IOService *provider)
+ 	 * every swap layer empty); scaled, it is the panel's top-left part. */
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+ 	/* Scaled, what CoreAnimation draws into the default surface must not land on the panel unscaled (a small copy of
+-	 * the screen in its corner): the surface has its own memory, free in the first bank, and is presented like any other. */
++	 * the screen in its corner): the surface has its own memory, free in the first bank, and is presented like any other.
++	 * Not at 0xa0000000: that is the ECT S-Boot leaves in RAM (DTB ect parameter_address, 0x19000 bytes), from which
++	 * Linux loads the APM firmware. Overwritten, a warm reboot into TWRP put garbage in the APM's SRAM and the next XNU
++	 * boot got no APM answer: no touch supply, no CPU/GPU voltages (hero2lte boot-2037919158). */
+ 	if (fScaled) {
+-		fSurface = sweet_surface_create_physical(0xa0000000ULL, fLogicalW, fLogicalH, (fLogicalW * 4 + 63) & ~63u,
++		fSurface = sweet_surface_create_physical(0xa0400000ULL, fLogicalW, fLogicalH, (fLogicalW * 4 + 63) & ~63u,
+ 		    SWEET_FB_FORMAT_BGRA);
+ 		SweetSurface *panel = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 		fPixels = panel != NULL ? panel->kernelAddress() : 0;
