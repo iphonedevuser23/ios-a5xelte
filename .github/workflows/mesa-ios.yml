@@ -8,7 +8,7 @@ name: mesa-ios
 on:
   workflow_dispatch:
   push:
-    branches: [herolte]
+    branches: [herolte, hero2lte]
     paths:
       - "gpu/mesa/**"
       - "gpu/eagl/**"
