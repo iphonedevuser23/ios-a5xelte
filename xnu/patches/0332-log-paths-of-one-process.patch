@@ -1,0 +1,61 @@
+hero2lte: herofile_proc=NAME logs every path one process looks up.
+
+lsd finds its saved LaunchServices database at every boot and still
+rebuilds it; log what else it looks at on the way (the recovery file,
+the version plists) to see why. herofile_max=N lines (default 800).
+
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -178,16 +178,27 @@
+ namei(struct nameidata *ndp)
+ {
+ 	static int on = -1;
++	static char watch[MAXCOMLEN + 1];       /* herofile_proc=NAME: every path that process looks up (0332) */
++	static int watch_max = 800, watch_lines;
+ 	char path[256];
+-	int error;
++	int error, watched = 0;
+ 
+ 	path[0] = 0;
+ 	if (on < 0) {
+ 		int v = 1;
+ 		PE_parse_boot_argn("herocsstore", &v, sizeof(v));
++		if (!PE_parse_boot_argn("herofile_proc", watch, sizeof(watch))) {
++			watch[0] = 0;
++		}
++		PE_parse_boot_argn("herofile_max", &watch_max, sizeof(watch_max));
+ 		on = v;
+ 	}
+-	if (on && hero_csstore_lines < 400 && ndp->ni_dirp != USER_ADDR_NULL) {
++	if (watch[0] && watch_lines < watch_max) {
++		char me[MAXCOMLEN + 1];
++		proc_selfname(me, sizeof(me));
++		watched = strcmp(me, watch) == 0;
++	}
++	if ((watched || (on && hero_csstore_lines < 400)) && ndp->ni_dirp != USER_ADDR_NULL) {
+ 		size_t done = 0;
+ 		if (UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
+ 			if (copyinstr(ndp->ni_dirp, path, sizeof(path), &done) != 0) {
+@@ -196,7 +207,7 @@
+ 		} else {
+ 			strlcpy(path, CAST_DOWN(const char *, ndp->ni_dirp), sizeof(path));
+ 		}
+-		if (!strnstr(path, "csstore", sizeof(path))) {
++		if (!watched && !strnstr(path, "csstore", sizeof(path))) {
+ 			path[0] = 0;
+ 		}
+ 	}
+@@ -207,7 +218,11 @@
+ 		unsigned op = (unsigned)ndp->ni_cnd.cn_nameiop;
+ 
+ 		proc_selfname(who, sizeof(who));
+-		hero_csstore_lines++;
++		if (watched) {
++			watch_lines++;
++		} else {
++			hero_csstore_lines++;
++		}
+ 		printf("HEROLTE CSSTORE: %s[%d] %s %s -> %d%s\n", who, proc_selfpid(), op < 4 ? ops[op] : "?",
+ 		    path, error, (error == 0 && op == 1 && ndp->ni_vp == NULLVP) ? " (new)" : "");
+ 	}
