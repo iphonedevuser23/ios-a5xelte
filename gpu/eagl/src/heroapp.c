@@ -13,9 +13,28 @@
 #include <objc/runtime.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
-extern void herodrm_log(const char *format, ...);
+/*
+ * herodrm_log lives in libdrm.2.dylib, but linking it made libheroapp depend on
+ * @rpath/libdrm.2.dylib with no LC_RPATH ever reaching the binary, so dyld could
+ * not resolve the dependency and libheroapp silently failed to load in every
+ * application (ALLOW_FAILED_LIBRARY_INSERTION let the app start without it).
+ * Apps never get HERO_LOG_STDERR, so the kernel-log pump is off here anyway; a
+ * local stderr stub keeps libheroapp self-contained (system libraries only) so
+ * it actually loads.
+ */
+static void
+herodrm_log(const char *format, ...)
+{
+   va_list arguments;
+   va_start(arguments, format);
+   vfprintf(stderr, format, arguments);
+   va_end(arguments);
+   fputc('\n', stderr);
+}
+
 extern void NSSetUncaughtExceptionHandler(void (*handler)(id));
 extern const char *getprogname(void);
 
