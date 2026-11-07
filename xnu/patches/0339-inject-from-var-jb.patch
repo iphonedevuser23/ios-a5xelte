@@ -1,0 +1,11 @@
+diff --git a/bsd/dev/herolte_gl.c b/bsd/dev/herolte_gl.c
+--- a/bsd/dev/herolte_gl.c
++++ b/bsd/dev/herolte_gl.c
+@@ -9,2 +9,2 @@
+ #define HGL_SB_TARGET   "/System/Library/CoreServices/SpringBoard.app/SpringBoard"
+-#define HGL_SB_LIB      "/private/var/herolte/lib/libherosb.dylib"
++#define HGL_SB_LIB      "/var/jb/usr/lib/libherosb.dylib"
+@@ -52,2 +52,2 @@
+-#define HGL_APP_LIB     "/private/var/herolte/lib/libheroapp.dylib"
++#define HGL_APP_LIB     "/var/jb/usr/lib/libheroapp.dylib"
+ #define HGL_APP_PIDS    64
