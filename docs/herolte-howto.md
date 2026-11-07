@@ -3,8 +3,12 @@
 Experimental. This **erases USERDATA** (all Android data) and replaces the
 BOOT partition. You need a flat **SM-G930F (Exynos 8890)**, an unlocked
 bootloader (OEM unlock), **TWRP** and `adb` on a PC. Other S7 variants
-(G930FD, G935F edge, Snapdragon models) are untested and have different
+(G930FD, Snapdragon models) are untested and have different
 hardware.
+
+S7 edge (SM-G935F, hero2lte): same board, port in progress; see
+`docs/hero2lte-bringup.md` (extra boot-arg `herobatmah=3600`; touch IC
+auto-detected by patch 0326).
 
 Apple's iOS userland is **not** in this repository and must not be
 uploaded publicly. You build your own root image from Apple's public IPSW in

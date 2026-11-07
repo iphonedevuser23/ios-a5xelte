@@ -1,0 +1,335 @@
+diff --git a/bsd/dev/herolte_touch.c b/bsd/dev/herolte_touch.c
+index a2772e1..0839b8a 100644
+--- a/bsd/dev/herolte_touch.c
++++ b/bsd/dev/herolte_touch.c
+@@ -13,6 +13,14 @@
+  * the controller's batcher, which takes the AP/APM hardware semaphore. The
+  * LDOs are switched on only if their programmed voltage is the expected one.
+  * Boot-arg herotouch=0 disables everything here.
++ *
++ * HERO2LTE (S7 edge SM-G935F): the same board wiring, but the BOOT DTB
++ * enables two touch ICs on this bus, picked per unit by the TSP-ID pin
++ * GPE7-1: sec_ts at 0x48 (as on the S7) or an STMicro FTS at 0x49
++ * (Linux drivers/input/touchscreen/stm/fts_ts.c, "stm,fts_touch",
++ * max_coords 0xfff/0xfff, same supplies and INT). With herotouchic=0
++ * (default) sec_ts is tried first and FTS if 0x48 does not ACK;
++ * herotouchic=1 forces sec_ts, herotouchic=2 forces FTS.
+  */
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+ #include <sys/param.h>
+@@ -30,7 +38,8 @@ void herolte_touch_probe(void);
+ #define HT_ALIVE_PA     0x10580000u     /* GPA1 CON +0x20, DAT +0x24 */
+ #define HT_PINS_PA      0x14ce0000u     /* GPF1 CON +0, DAT +4, PUD +8 */
+ #define HT_HSI2C_PA     0x14e10000u
+-#define HT_ADDR         0x48u
++#define HT_ADDR         0x48u           /* sec_ts */
++#define HT_ADDR_FTS     0x49u           /* STMicro FTS (S7 edge) */
+ 
+ #define HSI2C_CTL       0x00
+ #define HSI2C_FIFO_CTL  0x04
+@@ -58,6 +67,19 @@ void herolte_touch_probe(void);
+ #define SEC_TS_CMD_SENSE_ON     0x40
+ #define SEC_TS_CMD_CLEAR_EVENTS 0x60
+ 
++/* STMicro FTS (Samsung stm/fts_ts.h) */
++#define FTS_READ_ONE_EVENT      0x85
++#define FTS_SLEEPOUT            0x91
++#define FTS_SENSEON             0x93
++#define FTS_FLUSHBUFFER         0xa1
++#define FTS_FORCECALIBRATION    0xa2
++#define FTS_ID0                 0x39
++#define FTS_EV_ENTER            0x03
++#define FTS_EV_LEAVE            0x04
++#define FTS_EV_MOTION           0x05
++#define FTS_EV_ERROR            0x0f
++#define FTS_EV_READY            0x10
++
+ #define HT_FINGERS      10
+ 
+ /* PMIC bus: HSI2C 0x10550000 batcher (offsets from i2c-exynos5.c). */
+@@ -81,6 +103,7 @@ static vm_offset_t ht_alive, ht_pins, ht_i2c, ht_pm;
+ static uint32_t pm_cmd_buffer;
+ static unsigned pm_cmd_index, pm_cmd_pointer, pm_desc;
+ static int ht_sleep;
++static uint32_t ht_addr = HT_ADDR;
+ static bool ht_down[HT_FINGERS];
+ static int ht_x[HT_FINGERS], ht_y[HT_FINGERS];
+ 
+@@ -576,7 +599,7 @@ ht_message(bool receive, uint8_t *bytes, unsigned count)
+ 	}
+ 	ht_wr(ht_i2c, HSI2C_INT_STAT, ht_rd(ht_i2c, HSI2C_INT_STAT));
+ 	ht_wr(ht_i2c, HSI2C_FIFO_CTL, 3u | (receive ? (1u << 4) : (1u << 16)));
+-	ht_wr(ht_i2c, HSI2C_ADDR, HT_ADDR << 10);
++	ht_wr(ht_i2c, HSI2C_ADDR, ht_addr << 10);
+ 	ht_wr(ht_i2c, HSI2C_CTL, 9u | (receive ? 0x40u : 0x80u));
+ 	ht_wr(ht_i2c, HSI2C_INT_EN, 0xf80u | (receive ? 0x42u : 1u));
+ 	ht_wr(ht_i2c, HSI2C_AUTO_CONF, count | (receive ? 0x10000u : 0) | 0x20000u | 0x80000000u);
+@@ -722,6 +745,149 @@ ht_event(unsigned *lines)
+ 	return true;
+ }
+ 
++/*
++ * STMicro FTS (S7 edge). Commands are 1-4 byte strings; Linux
++ * fts_read_reg() sends them with a repeated start before the read, here
++ * (as for sec_ts above) a write with STOP, then the read. Same 10 retries.
++ */
++static bool
++ft_xfer(const uint8_t *cmd, unsigned clen, uint8_t *data, unsigned len)
++{
++	uint8_t c[4];
++
++	if (clen == 0 || clen > sizeof(c)) {
++		return false;
++	}
++	for (unsigned attempt = 0; attempt < 10; attempt++) {
++		if (attempt) {
++			ht_retries++;
++			delay(200);
++		}
++		for (unsigned i = 0; i < clen; i++) {
++			c[i] = cmd[i];
++		}
++		if (ht_message(false, c, clen) && (len == 0 || ht_message(true, data, len))) {
++			return true;
++		}
++	}
++	ht_lost++;
++	return false;
++}
++
++static bool
++ft_cmd(uint8_t cmd)
++{
++	return ft_xfer(&cmd, 1, NULL, 0);
++}
++
++/* fts_interrupt_set(INT_ENABLE): B6 00 1C 41. */
++static bool
++ft_int_enable(void)
++{
++	static const uint8_t cmd[4] = {0xb6, 0x00, 0x1c, 0x41};
++	return ft_xfer(cmd, sizeof(cmd), NULL, 0);
++}
++
++/* fts_init() after the firmware check: SLEEPOUT, SENSEON, FLUSH, INT on. */
++static bool
++ft_sense_on(bool calibrate)
++{
++	bool ok = ft_cmd(FTS_SLEEPOUT) && ft_cmd(FTS_SENSEON);
++	if (calibrate) {
++		ok = ok && ft_cmd(FTS_FORCECALIBRATION);
++	}
++	return ok && ft_cmd(FTS_FLUSHBUFFER) && ft_int_enable();
++}
++
++static bool
++ft_init(void)
++{
++	static const uint8_t reset[4] = {0xb6, 0x00, 0x23, 0x01};      /* fts_systemreset */
++	static const uint8_t chip_id[3] = {0xb6, 0x00, 0x07};           /* fts_read_chip_id */
++	uint8_t cmd = FTS_READ_ONE_EVENT, e[8] = {0}, v[7] = {0};
++	bool ready = false;
++
++	if (!ft_xfer(reset, sizeof(reset), NULL, 0)) {
++		printf("HEROLTE TOUCH: FTS: no ACK at 0x49 either\n");
++		return false;
++	}
++	ht_msleep(10);
++	/* fts_wait_for_ready(): pop events until CONTROLLER_READY (0x10). */
++	for (unsigned n = 0; n < 50 && !ready; n++) {
++		if (ft_xfer(&cmd, 1, e, sizeof(e)) && e[0] == FTS_EV_READY) {
++			ready = true;
++		} else {
++			ht_msleep(20);
++		}
++	}
++	printf("HEROLTE TOUCH: FTS %s: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++	    ready ? "ready" : "no READY event", e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
++	if (ft_xfer(chip_id, sizeof(chip_id), v, sizeof(v))) {
++		/* Linux expects 39 80 (rev 1) or 39 6c (rev 2) in v[1], v[2]. */
++		printf("HEROLTE TOUCH: FTS chip id %02x %02x %02x %02x %02x %02x%s\n",
++		    v[1], v[2], v[3], v[4], v[5], v[6], v[1] == FTS_ID0 ? "" : " (unexpected; continuing)");
++	}
++	if (!ft_sense_on(true)) {
++		printf("HEROLTE TOUCH: FTS SENSEON sequence failed\n");
++		return false;
++	}
++	return true;
++}
++
++/* One 8-byte event; false when the FIFO is empty (event id 0). */
++static bool
++ft_event(unsigned *lines)
++{
++	uint8_t cmd = FTS_READ_ONE_EVENT, e[8] = {0};
++
++	if (!ft_xfer(&cmd, 1, e, sizeof(e)) || e[0] == 0) {
++		return false;
++	}
++	/* fts_event_handler_type_b(): pointer events carry the id in bits 7:4. */
++	unsigned id = e[0] & 0xfu;
++	if (id < FTS_EV_ENTER || id > FTS_EV_MOTION) {
++		if (*lines < 64) {
++			(*lines)++;
++			printf("HEROLTE TOUCH: FTS status %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
++		}
++		if (e[0] == FTS_EV_READY) {
++			/* The controller reset itself: sense again, no recalibration. */
++			ht_release_all();
++			(void)ft_sense_on(false);
++		}
++		return true;
++	}
++	int tid = e[0] >> 4;
++	unsigned rx = e[1] | ((unsigned)(e[2] & 0xf) << 8);
++	unsigned ry = (e[2] >> 4) | ((unsigned)e[3] << 4);
++	if (tid >= HT_FINGERS) {
++		return true;
++	}
++	/* DTB stm,max_coords = <0xfff 0xfff>. */
++	int x = (int)(rx * 1440u / 4096u);
++	int y = (int)(ry * 2560u / 4096u);
++	if (*lines < 64 && id != FTS_EV_MOTION) {
++		(*lines)++;
++		printf("HEROLTE TOUCH: FTS id=%d event=%u raw=%u,%u -> %d,%d\n", tid, id, rx, ry, x, y);
++	}
++	if (id == FTS_EV_LEAVE) {
++		if (ht_down[tid]) {
++			ht_down[tid] = false;
++			sweet_hid_touch(tid, 0, ht_x[tid], ht_y[tid]);
++		}
++	} else {
++		if (id == FTS_EV_MOTION) {
++			ht_moves++;
++		}
++		ht_down[tid] = true;
++		ht_x[tid] = x;
++		ht_y[tid] = y;
++		sweet_hid_touch(tid, 1, x, y);
++	}
++	return true;
++}
++
+ static void
+ ht_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+@@ -759,30 +925,51 @@ ht_thread(__unused void *arg, __unused wait_result_t wr)
+ 	ht_wr(ht_pins, 0, (ht_rd(ht_pins, 0) & ~0xffu) | 0x22u);
+ 	ht_bus_init();
+ 
+-	bool ok = ht_read(SEC_TS_READ_BOOT_STATUS, b, 1);
+-	printf("HEROLTE TOUCH: boot status ok=%d %#x (0x20 = app mode)\n", ok, b[0]);
+-	if (!ok) {
+-		printf("HEROLTE TOUCH: no ACK at 0x48: supplies off or bus not clocked; stopping\n");
+-		return;
+-	}
+-	if (ht_read(SEC_TS_READ_DEVICE_ID, b, 5)) {
+-		printf("HEROLTE TOUCH: device id %02x %02x %02x %02x %02x\n", b[0], b[1], b[2], b[3], b[4]);
+-	}
+-	if (ht_read(SEC_TS_READ_SUB_ID, b, 5)) {
+-		printf("HEROLTE TOUCH: sub id %02x %02x %02x tx=%u rx=%u\n", b[0], b[1], b[2], b[3], b[4]);
+-	}
+-	if (ht_read(SEC_TS_READ_TS_STATUS, b, 4)) {
+-		printf("HEROLTE TOUCH: ts status %02x %02x %02x %02x\n", b[0], b[1], b[2], b[3]);
+-	}
+-	/* Drain pending status events (boot complete etc.), then sense on. */
+-	for (unsigned n = 0; n < 32 && ht_event(&lines); n++) {
++	/* 0 auto (sec_ts, then FTS), 1 sec_ts only, 2 FTS only (S7 edge). */
++	int ic = 0;
++	PE_parse_boot_argn("herotouchic", &ic, sizeof(ic));
++	bool fts = ic == 2;
++	bool ok = false;
++	if (!fts) {
++		ok = ht_read(SEC_TS_READ_BOOT_STATUS, b, 1);
++		printf("HEROLTE TOUCH: sec_ts boot status ok=%d %#x (0x20 = app mode)\n", ok, b[0]);
++		if (!ok && ic == 0) {
++			printf("HEROLTE TOUCH: no ACK at 0x48; trying STMicro FTS at 0x49 (S7 edge)\n");
++			fts = true;
++		}
+ 	}
+-	if (!ht_cmd(SEC_TS_CMD_SENSE_ON)) {
+-		printf("HEROLTE TOUCH: SENSE_ON failed\n");
+-		return;
++	if (fts) {
++		ht_addr = HT_ADDR_FTS;
++		ht_bus_init();
++		if (!ft_init()) {
++			printf("HEROLTE TOUCH: no touch IC answered; stopping\n");
++			return;
++		}
++	} else {
++		if (!ok) {
++			printf("HEROLTE TOUCH: no ACK at 0x48: supplies off or bus not clocked; stopping\n");
++			return;
++		}
++		if (ht_read(SEC_TS_READ_DEVICE_ID, b, 5)) {
++			printf("HEROLTE TOUCH: device id %02x %02x %02x %02x %02x\n", b[0], b[1], b[2], b[3], b[4]);
++		}
++		if (ht_read(SEC_TS_READ_SUB_ID, b, 5)) {
++			printf("HEROLTE TOUCH: sub id %02x %02x %02x tx=%u rx=%u\n", b[0], b[1], b[2], b[3], b[4]);
++		}
++		if (ht_read(SEC_TS_READ_TS_STATUS, b, 4)) {
++			printf("HEROLTE TOUCH: ts status %02x %02x %02x %02x\n", b[0], b[1], b[2], b[3]);
++		}
++		/* Drain pending status events (boot complete etc.), then sense on. */
++		for (unsigned n = 0; n < 32 && ht_event(&lines); n++) {
++		}
++		if (!ht_cmd(SEC_TS_CMD_SENSE_ON)) {
++			printf("HEROLTE TOUCH: SENSE_ON failed\n");
++			return;
++		}
+ 	}
+ 	ht_msleep(20);
+-	printf("HEROLTE TOUCH: sensing, INT=%d; polling every 5 ms\n", ht_int_low());
++	printf("HEROLTE TOUCH: %s sensing at %#x, INT=%d; polling every 5 ms\n",
++	    fts ? "FTS" : "sec_ts", ht_addr, ht_int_low());
+ 
+ 	unsigned failures = 0, ticks = 0, last_moves = 0, last_retries = 0, last_lost = 0;
+ 	for (;;) {
+@@ -797,12 +984,12 @@ ht_thread(__unused void *arg, __unused wait_result_t wr)
+ 		}
+ 		if (ht_int_low()) {
+ 			unsigned n = 0;
+-			while (n++ < 32 && ht_event(&lines)) {
++			while (n++ < 32 && (fts ? ft_event(&lines) : ht_event(&lines))) {
+ 			}
+ 			if (ht_int_low() && ++failures >= 200) {
+ 				printf("HEROLTE TOUCH: INT stuck low; clearing the event stack\n");
+ 				ht_release_all();
+-				(void)ht_cmd(SEC_TS_CMD_CLEAR_EVENTS);
++				(void)(fts ? ft_cmd(FTS_FLUSHBUFFER) : ht_cmd(SEC_TS_CMD_CLEAR_EVENTS));
+ 				failures = 0;
+ 			}
+ 		} else {
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 6d8a0fd..1cbc56b 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -17,7 +17,12 @@
+ extern "C" int herolte_fg_init(void);
+ extern "C" int herolte_fg_read(unsigned *percent, unsigned *mv, int *ma,
+     unsigned *rem_mah, unsigned *full_mah);
+-#define BATTERY_DESIGN_MAH 3000u        /* SM-G930F EB-BG930ABE */
++/*
++ * Design capacity: SM-G930F EB-BG930ABE 3000 mAh (default). The S7 edge
++ * SM-G935F (EB-BG935ABE) has 3600 mAh: boot-arg herobatmah=3600.
++ */
++static unsigned herolte_design_mah = 3000u;
++#define BATTERY_DESIGN_MAH herolte_design_mah
+ #else
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+@@ -301,6 +306,12 @@ SweetBattery::start(IOService *provider)
+ 		return false;
+ 	}
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
++	unsigned design = 0;
++	if (PE_parse_boot_argn("herobatmah", &design, sizeof(design)) &&
++	    design >= 1000u && design <= 10000u) {
++		herolte_design_mah = design;
++	}
++	IOLog("HEROLTE BATTERY: design capacity %u mAh\n", herolte_design_mah);
+ 	/* Default on; herofg=0 keeps the static fallback. */
+ 	fReal = herolte_fg_init() == 0;
+ #else
