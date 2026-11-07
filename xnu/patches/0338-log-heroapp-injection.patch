@@ -1,0 +1,25 @@
+diff --git a/bsd/dev/herolte_gl.c b/bsd/dev/herolte_gl.c
+--- a/bsd/dev/herolte_gl.c
++++ b/bsd/dev/herolte_gl.c
+@@ -49,6 +49,9 @@ uint64_t
+ herolte_gl_dyld_flags(void)
+ {
+ 	bool app = false;
+ 	for (unsigned i = 0; i < HGL_APP_PIDS; i++) {
+ 		app = app || hgl_app_pids[i] == proc_selfpid();
+ 	}
++	if (app) {
++		printf("HEROLTE GL: dyld flags granted to app pid %d\n", proc_selfpid());
++	}
+ 	if (!app && (hgl_pid < 0 || proc_selfpid() != hgl_pid) && (hgl_sb_pid < 0 || proc_selfpid() != hgl_sb_pid)) {
+ 		return 0;
+ 	}
+@@ -138,6 +141,7 @@ herolte_gl_env(const char *path, int pid, const char **extra, int max)
+ 		vnode_t appvp = NULLVP;
+ 		if (vnode_lookup(HGL_APP_LIB, 0, &appvp, vfs_context_kernel()) == 0) {
+ 			vnode_put(appvp);
+ 			hgl_app_pids[hgl_app_next++ % HGL_APP_PIDS] = pid;
++			printf("HEROLTE GL: libheroapp -> %s (pid %d)\n", path, pid);
+ 			extra[0] = "DYLD_INSERT_LIBRARIES=" HGL_APP_LIB;
+ 			return 1;
+ 		}
