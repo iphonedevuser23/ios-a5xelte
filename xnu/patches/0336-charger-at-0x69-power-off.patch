@@ -1,0 +1,99 @@
+hero2lte: the charger is at 0x69; power off and restart.
+
+The probe showed 0x66 is the MAX77854 top block (PMICID 0x54); the charger
+is its own slave at 0xD2 >> 1 (Samsung max77854.c). halt_all_cpus() only
+spun: power off now drops PS_HOLD as sec_power_off() does, restart is
+the PMU SWRESET.
+
+diff --git a/bsd/dev/herolte_battery.c b/bsd/dev/herolte_battery.c
+--- a/bsd/dev/herolte_battery.c
++++ b/bsd/dev/herolte_battery.c
+@@ -207,7 +207,8 @@
+  * Boot-args: herochg=0 only reads and logs, herochg_in=MA (default 1500),
+  * herochg_cc=MA (default 1500), both 100..2000.
+  */
+-#define CHG_ADDR        0x66u
++/* 0336: 0x66 is the MFD's top block (PMICID 0x54 rev 2); the charger is its own slave, 0xD2 >> 1 (max77854.c I2C_ADDR_CHG). */
++#define CHG_ADDR        0x69u
+ #define CHG_DETAILS_00  0xb3
+ #define CHG_DETAILS_01  0xb4
+ #define CHG_DETAILS_02  0xb5
+@@ -287,7 +288,7 @@
+ 	}
+ 	if (!chg_rd(CHG_CNFG_00, &c00) || !chg_rd(CHG_CNFG_02, &c02) || !chg_rd(CHG_CNFG_09, &c09)) {
+ 		if (failures++ < 4) {
+-			printf("HEROLTE CHG: no usable answer at 0x66 (CNFG_00=%#x 02=%#x 09=%#x); not writing\n", c00, c02, c09);
++			printf("HEROLTE CHG: no usable answer at 0x69 (CNFG_00=%#x 02=%#x 09=%#x); not writing\n", c00, c02, c09);
+ 		}
+ 		calls++;
+ 		return;
+@@ -323,6 +324,40 @@
+ 	}
+ }
+ 
++/*
++ * Power off and restart (patch 0336): iOS's slide to power off ends in halt_all_cpus(FALSE), which only spun with the
++ * screen on. As Samsung's sec_power_off(): PS_HOLD low (PMU PS_HOLD_CONTROL 0x330c bit 8) cuts the power; with a
++ * charger in, the phone comes back up (S-Boot starts again for the charger), as on Android. A restart is SWRESET.
++ */
++#define HERO_PMU_PA             0x105c0000u
++#define HERO_PMU_SWRESET        0x400
++#define HERO_PMU_PS_HOLD        0x330c
++
++__attribute__((noreturn)) void herolte_halt_restart(int reboot);
++
++void
++herolte_halt_restart(int reboot)
++{
++	vm_offset_t pmu = ml_io_map(HERO_PMU_PA, 0x4000);
++
++	printf("HEROLTE POWER: %s\n", reboot ? "restart (SWRESET)" : "power off (PS_HOLD low)");
++	delay(200000);
++	if (pmu) {
++		if (!reboot) {
++			volatile uint32_t *ps_hold = (volatile uint32_t *)(pmu + HERO_PMU_PS_HOLD);
++			*ps_hold = *ps_hold & ~0x100u;
++			__asm__ volatile ("dsb sy" ::: "memory");
++			delay(2000000);
++			printf("HEROLTE POWER: still on after PS_HOLD low (a charger?); restarting\n");
++		}
++		*(volatile uint32_t *)(pmu + HERO_PMU_SWRESET) = 1;
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
++	for (;;) {
++		__asm__ volatile ("wfi");
++	}
++}
++
+ int
+ herolte_fg_read(unsigned *percent, unsigned *mv, int *ma, unsigned *rem_mah, unsigned *full_mah)
+ {
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -742,15 +742,25 @@
+ 	return machine_info.memory_size;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++extern void herolte_halt_restart(int reboot) __attribute__((noreturn));
++#endif
++
+ __attribute__((noreturn))
+ void
+ halt_all_cpus(boolean_t reboot)
+ {
+ 	if (reboot) {
+ 		printf("MACH Reboot\n");
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++		herolte_halt_restart(1);
++#endif
+ 		PEHaltRestart(kPERestartCPU);
+ 	} else {
+ 		printf("CPU halted\n");
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++		herolte_halt_restart(0);
++#endif
+ 		PEHaltRestart(kPEHaltCPU);
+ 	}
+ 	while (1) {
