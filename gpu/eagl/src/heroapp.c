@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /*
  * herodrm_log lives in libdrm.2.dylib, but linking it made libheroapp depend on
@@ -190,5 +191,11 @@ install(void)
       sel_registerName("handleFailureInMethod:object:file:lineNumber:description:"));
    if (assertion != NULL) {
       assert_original = (void (*)(id, SEL, SEL, id, id, long, id, ...))method_setImplementation(assertion, (IMP)assert_failed);
+   }
+
+   /* Bootstrap ElleKit's tweak loader in this app so installed tweaks (PreferenceLoader, etc.) load.
+    * This port has no pspawn hook, so we load it directly. /private/var/herolte/tweaks.off disables it. */
+   if (access("/private/var/herolte/tweaks.off", F_OK) != 0) {
+      dlopen("/var/jb/usr/lib/TweakLoader.dylib", RTLD_NOW);
    }
 }

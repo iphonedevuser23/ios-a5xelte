@@ -5,6 +5,7 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
+#include <dlfcn.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdbool.h>
@@ -225,6 +226,11 @@ report_ranges(void *unused)
 __attribute__((constructor)) static void
 herosb_start(void)
 {
+   /* Bootstrap ElleKit's tweak loader in SpringBoard so installed tweaks (Cylinder, etc.) load.
+    * Normally ElleKit's pspawn hook does this; this port has no pspawn, so we load it directly.
+    * DROP_DIR tweaks.off disables it if a tweak destabilizes SpringBoard. */
+   if (access(DROP_DIR "tweaks.off", F_OK) != 0)
+      dlopen("/var/jb/usr/lib/TweakLoader.dylib", RTLD_NOW);
    if (access(DROP_DIR "fps.off", F_OK) != 0) {
       raise_frame_rates();
       dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), NULL, report_ranges);
