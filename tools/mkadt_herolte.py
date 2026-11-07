@@ -34,6 +34,12 @@ def child(node, name):
     for candidate in node.children:
         if candidate.prop('name') == mkadt.cstr(name):
             return candidate
+    # Without research/ipsw-x/d22ap.adt mkadt emits no /product (enough for
+    # kernel-only boots that stop before launchd); start an empty one.
+    if name == 'product':
+        product = mkadt.node('product', [('AAPL,phandle', mkadt.u32(0xfff0))])
+        node.children.append(product)
+        return product
     raise ValueError(f'missing donor ADT node {name}')
 
 
