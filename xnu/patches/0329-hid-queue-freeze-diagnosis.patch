@@ -1,0 +1,98 @@
+SWEET HID queue diagnosis for the hero2lte UI freeze.
+
+The freeze leaves every backboardd and SpringBoard thread idle in mach_msg
+while the kernel keeps dispatching touches and buttons: log, for every
+button event and for dropped events, whether the reader still advances the
+queue head, how many notifications were sent and whether any send failed.
+
+diff --git a/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp b/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp
+--- a/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp
++++ b/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp
+@@ -237,8 +237,36 @@
+ 
+ void IOHIDEventServiceQueue::sendDataAvailableNotification()
+ {
++    /*
++     * SWEET: IODataQueue::sendDataAvailableNotification() with the result
++     * kept. TIMED_OUT means a notification is already waiting in the port;
++     * NO_BUFFER silently drops it, and the queue then never notifies again
++     * until it is emptied (patch 0329, freeze diagnosis).
++     */
++    mach_msg_header_t * msgh = (mach_msg_header_t *)notifyMsg;	/* IODataQueueInternal starts with it */
++
+     _notificationCount++;
+-    super::sendDataAvailableNotification();
++    if (msgh && msgh->msgh_remote_port) {
++        kern_return_t kr = mach_msg_send_from_kernel_with_options(msgh, msgh->msgh_size, MACH_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
++        if (kr != MACH_MSG_SUCCESS && kr != MACH_SEND_TIMED_OUT) {
++            _sweetLastKr = kr;
++            if (_sweetSendFails++ < 8) {
++                IOLog("SWEET HIDQ: %p notification send returned %#x (failure %u)\n", this, kr, _sweetSendFails);
++            }
++        }
++    }
++}
++
++void IOHIDEventServiceQueue::sweetState(UInt32 *head, UInt32 *tail, UInt64 *notes, bool *port, UInt32 *fails, int *lastKr)
++{
++    mach_msg_header_t * msgh = (mach_msg_header_t *)notifyMsg;
++
++    *head = dataQueue ? __c11_atomic_load((_Atomic UInt32 *)&dataQueue->head, __ATOMIC_RELAXED) : 0;
++    *tail = dataQueue ? __c11_atomic_load((_Atomic UInt32 *)&dataQueue->tail, __ATOMIC_RELAXED) : 0;
++    *notes = _notificationCount;
++    *port = msgh && msgh->msgh_remote_port;
++    *fails = _sweetSendFails;
++    *lastKr = _sweetLastKr;
+ }
+ 
+ //---------------------------------------------------------------------------
+diff --git a/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.h b/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.h
+--- a/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.h
++++ b/iokit/Kernel/arm/hid/IOHIDEventServiceQueue.h
+@@ -48,6 +48,8 @@
+     OSObject                *_owner;
+     UInt32                  _options;
+     UInt64                  _notificationCount;
++    UInt32                  _sweetSendFails;	/* sends that did not reach the port */
++    int                     _sweetLastKr;
+ 
+     virtual void sendDataAvailableNotification() APPLE_KEXT_OVERRIDE;
+ 
+@@ -68,6 +70,9 @@
+     virtual void setNotificationPort(mach_port_t port) APPLE_KEXT_OVERRIDE;
+     virtual bool serialize(OSSerialize * serializer) const APPLE_KEXT_OVERRIDE;
+ 
++    /* SWEET: queue state for the freeze diagnosis (patch 0329). */
++    void sweetState(UInt32 *head, UInt32 *tail, UInt64 *notes, bool *port, UInt32 *fails, int *lastKr);
++
+ };
+ 
+ //---------------------------------------------------------------------------
+diff --git a/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp b/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp
+--- a/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp
++++ b/iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp
+@@ -637,6 +637,24 @@
+             ++_droppedEventCount;
+             IOHID_DEBUG(kIOHIDDebugCode_HIDEventServiceEnqueueFail, event->getTimeStampOfType(kIOHIDEventTimestampTypeDefault), event->getOptions() & kIOHIDEventOptionContinuousTime, 0, 0);
+         }
++        /*
++         * SWEET (patch 0329): when the UI stops answering, say whether the
++         * reader (backboardd) still takes events out of this queue: head
++         * moves when it reads, tail when we write. Every button event, the
++         * first drops, then every 64th drop.
++         */
++        if (_lastEventType == kIOHIDEventTypeKeyboard || (result == false &&
++            (_droppedEventCount <= 4 || (_droppedEventCount % 64) == 0))) {
++            UInt32 head, tail, fails;
++            UInt64 notes;
++            bool port;
++            int lastKr;
++            _queue->sweetState(&head, &tail, &notes, &port, &fails, &lastKr);
++            IOLog("SWEET HIDQ: %p %s type %u: head %u tail %u events %llu dropped %llu notes %llu port %d send-fails %u (last %#x)\n",
++                _queue, result ? "queued" : "DROPPED", (unsigned)_lastEventType, head, tail,
++                (unsigned long long)_eventCount, (unsigned long long)_droppedEventCount,
++                (unsigned long long)notes, port, fails, lastKr);
++        }
+     }
+ }
+ 
