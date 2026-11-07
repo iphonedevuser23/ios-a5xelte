@@ -49,7 +49,7 @@ $CC -O1 -g -Wno-deprecated-declarations -fno-objc-arc -I"$HERE/src" "$HERE/test/
   -o "$OUT/eagl_ca_test" \
   -framework Foundation -framework CoreFoundation -framework CoreGraphics -framework IOSurface \
   -framework QuartzCore -framework OpenGLES
-$CC -O2 -Wall -o "$OUT/hero-run" "$HERE/test/hero-run.c" -L "$OUT/lib" -ldrm.2 -lobjc -framework Foundation \
+$CC -O2 -Wall -o "$OUT/hero-run" "$HERE/test/hero-run.c" -L "$OUT/lib" -ldrm.2 -lobjc -lz -framework Foundation \
   -Wl,-rpath,/private/var/herolte/lib
 
 $CC -O2 -Wall -dynamiclib -o "$OUT/lib/libherosb.dylib" "$HERE/src/herosb.c" -install_name @rpath/libherosb.dylib \

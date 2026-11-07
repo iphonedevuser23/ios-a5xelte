@@ -28,6 +28,7 @@ extern void NSSetUncaughtExceptionHandler(void (*handler)(id));
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #define DROP_DIR "/private/var/herolte/"
 #define OUT DROP_DIR "test.out"
@@ -577,6 +578,14 @@ static void
 reduce_transparency(void)
 {
    struct stat st;
+   /* transparency.on turns it back off (set once, the preference stays for good otherwise) */
+   if (stat("/private/var/herolte/transparency.on", &st) == 0) {
+      CFPreferencesSetValue(CFSTR("EnhancedBackgroundContrastEnabled"), kCFBooleanFalse, CFSTR("com.apple.Accessibility"),
+                            CFSTR("mobile"), kCFPreferencesAnyHost);
+      CFPreferencesSynchronize(CFSTR("com.apple.Accessibility"), CFSTR("mobile"), kCFPreferencesAnyHost);
+      herodrm_log("hero-run: Reduce Transparency off (transparency.on)");
+      return;
+   }
    if (stat("/private/var/herolte/reduce.transparency", &st) != 0)
       return;
    CFPreferencesSetValue(CFSTR("EnhancedBackgroundContrastEnabled"), kCFBooleanTrue, CFSTR("com.apple.Accessibility"),
@@ -679,6 +688,226 @@ widgets_to_background(void *unused)
    }
 }
 
+/*
+ * Rootless jailbreak userland (Procursus, laid out as Dopamine and palera1n do: /var/jb). DROP_DIR jb/bootstrap.tar.gz
+ * (Procursus's bootstrap for CoreFoundation 1900, gzip instead of zstd: zlib is in the system) is unpacked once, only
+ * below var/jb; prep_bootstrap.sh runs with no password prompt; then every .deb in DROP_DIR jb/ goes in with dpkg and
+ * /var/jb/Applications is registered with uicache. Each step leaves a marker and is not repeated once it worked.
+ */
+#define JB_DROP DROP_DIR "jb/"
+#define JB_OUT  DROP_DIR "jb.out"
+
+static unsigned long
+tar_octal(const char *p, int n)
+{
+   unsigned long v = 0;
+   for (int i = 0; i < n && p[i]; i++) {
+      if (p[i] >= '0' && p[i] <= '7')
+         v = v * 8 + (unsigned long)(p[i] - '0');
+   }
+   return v;
+}
+
+static void
+make_parents(const char *path)
+{
+   char dir[1024];
+   snprintf(dir, sizeof(dir), "%s", path);
+   for (char *s = dir + 1; *s; s++) {
+      if (*s == '/') {
+         *s = 0;
+         mkdir(dir, 0755);
+         *s = '/';
+      }
+   }
+}
+
+static int
+tar_skip(gzFile z, unsigned long n)
+{
+   char buf[65536];
+   while (n > 0) {
+      int want = n > sizeof(buf) ? (int)sizeof(buf) : (int)n, got = gzread(z, buf, (unsigned)want);
+      if (got <= 0)
+         return -1;
+      n -= (unsigned long)got;
+   }
+   return 0;
+}
+
+/* Regular files, directories and symbolic links (all the bootstrap has); owners and set-id bits kept. */
+static int
+untar_jb(const char *archive, unsigned *files_out)
+{
+   gzFile z = gzopen(archive, "rb");
+   unsigned char h[512];
+   unsigned files = 0, refused = 0;
+   if (!z)
+      return -1;
+   gzbuffer(z, 1 << 17);
+   for (;;) {
+      if (gzread(z, h, sizeof(h)) != (int)sizeof(h))
+         break;
+      int zero = 1;
+      for (int i = 0; i < 512 && zero; i++)
+         zero = h[i] == 0;
+      if (zero)
+         break;
+      char name[256] = "", link[101] = "", path[1100];
+      const char *prefix = (const char *)h + 345;
+      if (memcmp(h + 257, "ustar", 5) == 0 && prefix[0])
+         snprintf(name, sizeof(name), "%.155s/%.100s", prefix, (const char *)h);
+      else
+         snprintf(name, sizeof(name), "%.100s", (const char *)h);
+      memcpy(link, h + 157, 100);
+      unsigned long mode = tar_octal((const char *)h + 100, 8), uid = tar_octal((const char *)h + 108, 8),
+                    gid = tar_octal((const char *)h + 116, 8), size = tar_octal((const char *)h + 124, 12);
+      unsigned long padded = (size + 511) / 512 * 512;
+      char type = (char)h[156];
+      const char *rel = name;
+      while (rel[0] == '.' && rel[1] == '/')
+         rel += 2;
+      if (strncmp(rel, "var/jb", 6) != 0 || (rel[6] && rel[6] != '/') || strstr(rel, "..")) {
+         refused++;
+         if (tar_skip(z, padded))
+            break;
+         continue;
+      }
+      snprintf(path, sizeof(path), "/private/%s", rel);
+      size_t len = strlen(path);
+      while (len > 1 && path[len - 1] == '/')
+         path[--len] = 0;
+      make_parents(path);
+      if (type == '5') {
+         mkdir(path, (mode_t)(mode & 07777));
+         chown(path, (uid_t)uid, (gid_t)gid);
+         chmod(path, (mode_t)(mode & 07777));
+      } else if (type == '2') {
+         unlink(path);
+         symlink(link, path);
+         lchown(path, (uid_t)uid, (gid_t)gid);
+      } else if (type == '0' || type == 0) {
+         int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+         char buf[65536];
+         unsigned long left = size;
+         while (left > 0) {
+            int want = left > sizeof(buf) ? (int)sizeof(buf) : (int)left, got = gzread(z, buf, (unsigned)want);
+            if (got <= 0)
+               break;
+            if (fd >= 0 && write(fd, buf, (size_t)got) != got) {
+               close(fd);
+               fd = -1;
+            }
+            left -= (unsigned long)got;
+         }
+         if (left || tar_skip(z, padded - size))
+            break;
+         if (fd >= 0) {
+            fchown(fd, (uid_t)uid, (gid_t)gid);
+            fchmod(fd, (mode_t)(mode & 07777));     /* after chown, which clears set-id bits */
+            close(fd);
+            files++;
+         }
+         continue;
+      }
+      if (tar_skip(z, padded))
+         break;
+   }
+   int end = gzeof(z);
+   gzclose(z);
+   if (refused)
+      herodrm_log("hero-run: jailbreak: %u entries outside var/jb left out", refused);
+   *files_out = files;
+   return end ? 0 : -2;
+}
+
+/* Run as root with the jailbreak's PATH; its output goes to the log (40 lines at most). */
+static int
+argc_of(char *const argv[])
+{
+   int n = 0;
+   while (argv[n])
+      n++;
+   return n;
+}
+
+static int
+jb_run(char *const argv[])
+{
+   static char *const env[] = {
+      "PATH=/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "NO_PASSWORD_PROMPT=1", "HOME=/var/root", "DEBIAN_FRONTEND=noninteractive", "TERM=dumb", NULL,
+   };
+   posix_spawn_file_actions_t fa;
+   posix_spawn_file_actions_init(&fa);
+   posix_spawn_file_actions_addopen(&fa, 1, JB_OUT, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+   posix_spawn_file_actions_adddup2(&fa, 1, 2);
+   pid_t pid;
+   int status = -1, err = posix_spawn(&pid, argv[0], &fa, NULL, argv, env);
+   posix_spawn_file_actions_destroy(&fa);
+   if (err) {
+      herodrm_log("hero-run: jailbreak: %s: spawn error %d", argv[0], err);
+      return -1;
+   }
+   waitpid(pid, &status, 0);
+   FILE *f = fopen(JB_OUT, "r");
+   char line[400];
+   int n = 0;
+   while (f && fgets(line, sizeof(line), f) && n++ < 40) {
+      line[strcspn(line, "\n")] = 0;
+      herodrm_log("jb| %s", line);
+   }
+   if (f)
+      fclose(f);
+   int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+   herodrm_log("hero-run: jailbreak: %s -> %d", argv[argc_of(argv) > 1 ? 1 : 0], code);
+   return code;
+}
+
+static void *
+install_jailbreak(void *unused)
+{
+   (void)unused;
+   if (access(JB_DROP "bootstrap.tar.gz", F_OK) != 0 && access("/var/jb/.procursus_strapped", F_OK) != 0)
+      return NULL;
+   sleep(40);   /* after SpringBoard and lsd are up */
+   if (access("/var/jb/.procursus_strapped", F_OK) != 0) {
+      unsigned files = 0;
+      time_t start = time(NULL);
+      int r = untar_jb(JB_DROP "bootstrap.tar.gz", &files);
+      herodrm_log("hero-run: jailbreak: bootstrap unpacked: %d, %u files, %ld s", r, files, (long)(time(NULL) - start));
+      if (r != 0)
+         return NULL;
+   }
+   if (access("/var/jb/prep_bootstrap.sh", F_OK) == 0) {
+      char *prep[] = { "/var/jb/bin/sh", "/var/jb/prep_bootstrap.sh", NULL };
+      jb_run(prep);
+   }
+   if (access(DROP_DIR "jb.debs.done", F_OK) != 0) {
+      DIR *d = opendir(JB_DROP);
+      struct dirent *e;
+      int ok = 1, any = 0;
+      while (d && (e = readdir(d))) {
+         size_t l = strlen(e->d_name);
+         if (l < 5 || strcmp(e->d_name + l - 4, ".deb") != 0)
+            continue;
+         char deb[512];
+         snprintf(deb, sizeof(deb), "%s%s", JB_DROP, e->d_name);
+         char *dpkg[] = { "/var/jb/usr/bin/dpkg", "-i", deb, NULL };
+         any = 1;
+         ok &= jb_run(dpkg) == 0;
+      }
+      if (d)
+         closedir(d);
+      if (any && ok) {
+         char *uicache[] = { "/var/jb/usr/bin/uicache", "-a", NULL };
+         if (jb_run(uicache) == 0)
+            close(open(DROP_DIR "jb.debs.done", O_WRONLY | O_CREAT, 0644));
+      }
+   }
+   return NULL;
+}
+
 int
 main(void)
 {
@@ -700,8 +929,10 @@ main(void)
     * A thread (a forked child has no mach ports for herodrm_log), and only after the fork: with a second thread alive
     * the census child aborted in +[LSRecord initialize] (objc's fork safety, boot-0320).
     */
-   pthread_t widgets;
+   pthread_t widgets, jailbreak;
    int widgets_on = pthread_create(&widgets, NULL, widgets_to_background, NULL) == 0;
+   if (pthread_create(&jailbreak, NULL, install_jailbreak, NULL) == 0)
+      pthread_detach(jailbreak);
    sleep(20);
    load_env();
    posix_spawn_file_actions_t fa;
