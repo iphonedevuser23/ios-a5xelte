@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/herolte_gl.c b/bsd/dev/herolte_gl.c
+index 2ee430c..89061ce 100644
+--- a/bsd/dev/herolte_gl.c
++++ b/bsd/dev/herolte_gl.c
+@@ -29,6 +29,9 @@ uint64_t herolte_gl_dyld_flags(void);
+ #define HGL_MAX_LAUNCHES 2
+ #define HGL_SB_TARGET   "/System/Library/CoreServices/SpringBoard.app/SpringBoard"
+ #define HGL_SB_LIB      "/var/jb/usr/lib/libherosb.dylib"
++/* SpringBoard relaunches on every respring; unlike the backboardd shim it must keep getting libherosb
++ * so tweaks and the FakePass lock screen survive resprings. Give it its own, effectively-unlimited cap. */
++#define HGL_SB_MAX_LAUNCHES 1000000
+ 
+ /*
+  * dyld only honours DYLD_* variables when AMFI allows them
+@@ -145,7 +148,7 @@ herolte_gl_env(const char *path, int pid, const char **extra, int max)
+ 	 */
+ 	int sb = 0;
+ 	PE_parse_boot_argn("herosb", &sb, sizeof(sb));
+-	if (sb && path != NULL && strcmp(path, HGL_SB_TARGET) == 0 && max >= 1 && hgl_sb_launches < HGL_MAX_LAUNCHES) {
++	if (sb && path != NULL && strcmp(path, HGL_SB_TARGET) == 0 && max >= 1 && hgl_sb_launches < HGL_SB_MAX_LAUNCHES) {
+ 		vnode_t sbvp = NULLVP;
+ 		if (vnode_lookup(HGL_SB_LIB, 0, &sbvp, vfs_context_kernel()) == 0) {
+ 			vnode_put(sbvp);

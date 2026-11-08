@@ -101,9 +101,10 @@ look_at_windows(void *unused)
 }
 
 /*
- * The ADT says "home button" (home-button-type 1): UIKit then has a status bar for this 750x1334 screen, where type 2
- * gets the red rdar:45025538 one. SpringBoard alone is told type 2, which is where the home gestures are decided, as
- * the old home-gesture tweaks did. DROP_DIR gestures.off turns it off.
+ * The ADT says "home button" (home-button-type 1), which is the iPhone 7/8 layout the hero2's physical home button
+ * matches, and the default here. Telling SpringBoard type 2 switches it to the iPhone-X gesture layout (no home
+ * button, swipe-up home); DROP_DIR gestures.on opts into that. The status bar is kept working for BOTH layouts by
+ * keep_status_bar(), which runs unconditionally, so opting out of gestures no longer costs the status bar.
  */
 static long
 says_gestures(id self, SEL cmd)
@@ -166,7 +167,6 @@ keep_status_bar(void)
 static void
 ask_for_gestures(void)
 {
-   keep_status_bar();
    Class platform = objc_getClass("BSPlatform");
    Method type = platform ? class_getInstanceMethod(platform, sel_registerName("homeButtonType")) : NULL;
    if (type) {
@@ -247,7 +247,8 @@ herosb_start(void)
       raise_frame_rates();
       dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), NULL, report_ranges);
    }
-   if (access(DROP_DIR "gestures.off", F_OK) != 0)
+   keep_status_bar();                          /* status bar works in both the 7/8 and the X layout */
+   if (access(DROP_DIR "gestures.on", F_OK) == 0)   /* opt in to the iPhone-X gesture layout; default is 7/8 */
       ask_for_gestures();
    if (access(DROP_DIR "wallpaper.off", F_OK) == 0)
       return;
