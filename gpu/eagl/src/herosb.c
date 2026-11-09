@@ -46,7 +46,6 @@ send0(id target, const char *selector)
 
 static id picture;
 static bool gestures_on;
-static int status_bar_kept, status_bar_asked, status_bar_replaced;
 static unsigned rounds;
 
 static void
@@ -85,7 +84,7 @@ look_at_windows(void *unused)
    }
    size_t count = windows ? ((size_t (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count")) : 0;
    if (rounds == 1 || rounds == 6)
-      herodrm_log("herosb: round %u, %zu windows, picture %d, gestures %d, status bar hooks %d asked %d replaced %d", rounds, count, picture != nil, gestures_on, status_bar_kept, status_bar_asked, status_bar_replaced);
+      herodrm_log("herosb: round %u, %zu windows, picture %d, gestures %d", rounds, count, picture != nil, gestures_on);
    for (size_t i = 0; picture && i < count; i++) {
       id window = ((id (*)(id, SEL, size_t))objc_msgSend)(windows, sel_registerName("objectAtIndex:"), i);
       const char *name = object_getClassName(window);
@@ -103,8 +102,9 @@ look_at_windows(void *unused)
 /*
  * The ADT says "home button" (home-button-type 1), which is the iPhone 7/8 layout the hero2's physical home button
  * matches, and the default here. Telling SpringBoard type 2 switches it to the iPhone-X gesture layout (no home
- * button, swipe-up home); DROP_DIR gestures.on opts into that. The status bar is kept working for BOTH layouts by
- * keep_status_bar(), which runs unconditionally, so opting out of gestures no longer costs the status bar.
+ * button, swipe-up home); DROP_DIR gestures.on opts into that. The status bar provider is left stock: forcing
+ * _UIStatusBarVisualProvider_Phone made Control Center call regionIdentifiersForPartWithIdentifier: on it and throw
+ * NSInvalidArgumentException, crashing SpringBoard whenever Control Center opened.
  */
 static long
 says_gestures(id self, SEL cmd)
@@ -116,52 +116,6 @@ static BOOL
 says_yes(id self, SEL cmd)
 {
    return YES;
-}
-
-/*
- * ...but told type 2, UIKit in SpringBoard asks each provider class in turn, none takes a 750x1334 screen and it ends on
- * the red rdar:45025538 fallback. The plain phone's class takes any screen here, and is put in where the fallback
- * still reaches the status bar.
- */
-static Class
-phone_takes_it(id self, SEL cmd, id screen, id info)
-{
-   status_bar_asked++;
-   return objc_getClass("_UIStatusBarVisualProvider_Phone");
-}
-
-static void (*set_provider_was)(id, SEL, Class);
-
-static void
-set_provider(id self, SEL cmd, Class provider)
-{
-   if (provider == objc_getClass("_UIStatusBarVisualProvider_Fallback")) {
-      status_bar_replaced++;
-      provider = objc_getClass("_UIStatusBarVisualProvider_Phone");
-   }
-   set_provider_was(self, cmd, provider);
-}
-
-static void
-keep_status_bar(void)
-{
-   static const char *const providers[] = { "_UIStatusBarVisualProvider_iOS", "_UIStatusBarVisualProvider_Phone",
-      "_UIStatusBarVisualProvider_Fallback" };
-   SEL pick = sel_registerName("visualProviderSubclassForScreen:visualProviderInfo:");
-   for (size_t i = 0; i < sizeof(providers) / sizeof(providers[0]); i++) {
-      Class provider = objc_getClass(providers[i]);
-      Method method = provider ? class_getClassMethod(provider, pick) : NULL;
-      if (method) {
-         method_setImplementation(method, (IMP)phone_takes_it);
-         status_bar_kept++;
-      }
-   }
-   Class bar = objc_getClass("_UIStatusBar");
-   Method setter = bar ? class_getInstanceMethod(bar, sel_registerName("setVisualProviderClass:")) : NULL;
-   if (setter) {
-      set_provider_was = (void (*)(id, SEL, Class))method_setImplementation(setter, (IMP)set_provider);
-      status_bar_kept += 10;
-   }
 }
 
 static void
@@ -247,7 +201,6 @@ herosb_start(void)
       raise_frame_rates();
       dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), NULL, report_ranges);
    }
-   keep_status_bar();                          /* status bar works in both the 7/8 and the X layout */
    if (access(DROP_DIR "gestures.on", F_OK) == 0)   /* opt in to the iPhone-X gesture layout; default is 7/8 */
       ask_for_gestures();
    if (access(DROP_DIR "wallpaper.off", F_OK) == 0)
