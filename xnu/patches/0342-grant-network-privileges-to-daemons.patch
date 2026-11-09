@@ -1,0 +1,24 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 10e01a9..93ba3bb 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -330,6 +330,19 @@ sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
+ 	if (priv == PRIV_WORK_INTERVAL) {
+ 		return 0;
+ 	}
++	/*
++	 * iOS grants these to entitled platform binaries through Sandbox/AMFI. This port has no grant table, so
++	 * deny-all crippled every networked daemon: trustd (TLS), nsurlsessiond (URL fetches), mDNSResponder (DNS)
++	 * and geod (location) all failed PRIV_NET_PRIVILEGED_SOCKET_DELEGATE (10001), so Weather, Files/iCloud and the
++	 * like never loaded. Grant the network privilege classes (PRIV_NET_* 10000-10999, PRIV_NETINET_* 11000-11999,
++	 * and the 12000-range the identity/rapport daemons ask for) plus the benign proc privileges daemons request.
++	 */
++	if (priv >= 10000 && priv < 13000) {
++		return 0;
++	}
++	if (priv == 1002 || priv == 1005 || priv == 1007) {
++		return 0;
++	}
+ 	char name[20];
+ 	proc_selfname(name, sizeof(name));
+ 	for (int i = 0; i < sweet_priv_logged_count; i++) {
