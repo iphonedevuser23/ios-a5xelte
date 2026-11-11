@@ -1,41 +1,71 @@
-# iOS 16 on the Samsung Galaxy S7 (SM-G930F, Exynos 8890) — `herolte` branch
+# iOS 16 on the Samsung Galaxy S7 edge (SM-G935F, Exynos 8890) — `hero2lte` branch
 
-**Status, 2026-10-31:** Apple's XNU kernel boots on a flat Galaxy S7 and runs the
-unmodified **iPhone X iOS 16.7.16 userland** to the home screen with **GPU
-acceleration**: CoreAnimation renders on the Mali-T880 through OpenGL ES (Mesa
-Panfrost under an EAGL bridge). Apps open and load, and it is usable day to day
-apart from the gaps below. There is no Metal.
+**Status, 2026-11-11:** Apple's XNU kernel boots on a Galaxy S7 edge and runs an
+**iOS 16.7 userland** to the home screen with **GPU-accelerated** CoreAnimation
+(the Mali-T880 through an OpenGL ES / Mesa bridge). The phone presents itself to
+iOS as an **iPhone 8** (home-button device, 750×1334 @2x). It is a usable
+day-to-day device for a growing set of things — home screen, apps, Settings,
+Control Center, the lock screen with a real passcode, a working jailbreak with
+tweak injection, Wi-Fi and audio — with the gaps noted below. There is no Metal.
+
+> Experimental bring-up on real hardware, not a finished OS. Apple's security
+> model is largely switched off (permissive code-signing/sandbox, stub key
+> store), and it installs its root into the `USERDATA` partition. Don't put
+> anything personal on it.
 
 | Area | State |
 | --- | --- |
-| Boot | Samsung S-Boot loads our loader from BOOT (`shim/herolte/`), which starts XNU |
-| CPU | All 8 cores. Mongoose raised from the bootloader's 728 MHz to 2600 MHz (measured 2598) at Samsung's own voltage table; UI threads prefer Mongoose, busy daemons the A53s (0274). No thermal limit yet |
+| Boot | Samsung S-Boot loads our loader from the `BOOT` partition (`shim/herolte/`), which starts XNU. Only `BOOT` is written; the drop zone lives at the end of `USERDATA` |
+| CPU | All 8 cores. The four Mongoose M1 big cores run at **1976 MHz** on a lower voltage point (down from 2600) to keep the phone cool; the four Cortex-A53s carry the busy daemons. arm64 without LSE or pointer authentication |
 | RAM | 2 GiB of the second DRAM bank |
-| Storage | Own Exynos UFS driver; iOS root is HFSX in USERDATA, read/write, with the system apps |
-| GPU | Mali-T880 MP12 at 650 MHz through EAGL → OSMesa/Panfrost → our kernel job service. `JOB_READ_FAULT` (0x42) can still stop the GPU until reboot; not seen since the resolution below, cause unknown |
-| Display | iOS draws an iPhone 8 screen, 750×1334 @2x (72% fewer pixels), and the GPU scales it to the 1440×2560 panel. About 35-38 fps when in use, slower in the heaviest frames |
-| Navigation | Physical Home button (`home-button-type` 1). Home gestures need type 2, which brings UIKit's red rdar:45025538 status bar at this size; not solved |
-| Wallpaper | A fixed picture from the drop zone, drawn from inside SpringBoard (`gpu/eagl/src/herosb.c`). PosterBoard has no providers here, so the wallpaper gallery stays empty |
-| Touch, buttons, battery | Working |
-| Not working | modem, Wi-Fi, Bluetooth, audio, camera, sensors, sleep, Face ID. Widgets mostly wait; the lock screen's clock and date overlap |
+| Storage | Own Exynos UFS driver; the iOS root is a read/write HFSX volume in `USERDATA`, alongside the stock system apps |
+| GPU | Mali-T880 MP12 through an EAGL → Mesa/OSMesa bridge; CoreAnimation is accelerated and the 750×1334 image is scaled to the 1440×2560 QHD edge panel. Roughly 20–38 fps |
+| Display | Presented as an iPhone 8 screen, 750×1334 @2x |
+| Navigation | Physical **Home button** (`home-button-type` 1), the iPhone 7/8 layout that matches the hardware button. An iPhone-X gesture layout is available as an opt-in (`gestures.on` in the drop zone) |
+| Wi-Fi | Broadcom `bcmdhd` firmware loaded from the drop zone; associates to WPA2 as `en0` (takes a minute or two to connect from cold) |
+| Audio | Working (HakiOS audio path) |
+| Touch, buttons, battery | Working (FTS touch, PMIC keys, fuel gauge) |
+| Charging | MAX77854 charger driven directly — watchdog kept alive, input/charge current limited (tunable; set to **1 A** for lower heat) |
+| Jailbreak | Sileo, `libkrw0` kernel read/write, and ElleKit tweak injection that **survives resprings**. Substrate/ElleKit tweaks (Cylinder, etc.) load |
+| Lock screen | Real passcode enforced: kernel `AppleKeyStore` (SweetKeyStore) selectors plus FakePass. Set a PIN, lock, and it asks for it |
+| GUI | backboardd, SpringBoard, home screen, lock screen, Control Center, Notification Center, Settings, app launching |
 
-What made it usable, in the order found: factory GPU and CPU rates at factory
-voltages, the apps in the root image, moving `BTAudioHALPlugin` away (it kept
-asking the absent bluetoothd; idle CPU fell from over 300% to under 25% of 800%,
-found by [syncmodz/ios-s9](https://github.com/syncmodz/ios-s9)), and the lower
-resolution. Boot arguments and how to build the ADT: `tools/mkadt_herolte.py --iphone8`
-and [HEROLTE_PROGRESS.md](HEROLTE_PROGRESS.md) (Spanish).
+**Working on now:** background-fetch apps — Weather, automatic time, etc. A
+boot-time power optimization (`hero-run`) was throttling `nsurlsessiond`/`dasd`,
+which stalled their fetches; general networking (Safari, `apt`) already works.
+Control Center's status bar and module layout are still partial (a
+device-identity question, not a hook).
 
-How to try it: [docs/herolte-howto.md](docs/herolte-howto.md) (erases USERDATA;
-Apple's software is not in this repository). The S7 kernel patches are
-`xnu/patches/0200` and up; the board config is `MACHINE_CONFIG=HEROLTE`.
+**Not working:** cellular/modem (no iOS baseband for the Shannon modem),
+Bluetooth, camera (would need the iOS camera stack bridged to the Exynos ISP),
+Face ID / SEP, some sensors and proper sleep. The Files "Shared" tab and the
+App Store need an Apple ID signed in.
 
-Next: thermal limit, audio, Wi-Fi, more optimization. Help is welcome. Please
-open an issue with the log from `tools/herolte-log-pull.py` and a photo of the screen.
+**Build:** the kernel builds on GitHub's macOS runners with
+[blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build)
+(`xnu-8796`, patches in `xnu/patches/` applied in order, board config
+`MACHINE_CONFIG=HEROLTE`); `.github/workflows/mesa-ios.yml` builds the GPU/EAGL
+libraries and the `hero-run` helper. The Apple Device Tree comes from
+`tools/mkadt_herolte.py --iphone8 --bank2`, and the boot image from
+`tools/mkpayload.py` + `tools/herolte-pack-boot.py pack`. The S7-edge patch
+series is `xnu/patches/0326` and up (touch/battery, scaled surface, APM
+firmware, charger control, passcode key store, respring-safe injection, daemon
+network privileges), on top of the `herolte` base (`0200`+).
 
-Credits: Mesa/Panfrost, [HakiOS](https://github.com/oosexgang/hackios-xnu-kernel) EAGL bridge (`gpu/hakios-gl`, see its NOTICE),
-Bergamota's EAGL shim (`gpu/eagl`), [ios-sweet](https://github.com/dipa-studio/ios-sweet),
-[syncmodz/ios-s9](https://github.com/syncmodz/ios-s9) and the LineageOS Exynos 8890 kernel for the hardware tables.
+How to try it: [docs/herolte-howto.md](docs/herolte-howto.md) (erases
+`USERDATA`; Apple's software is not in this repository). Boot arguments and the
+full engineering log are in [HEROLTE_PROGRESS.md](HEROLTE_PROGRESS.md) (Spanish).
+
+Next: finish background networking, Control Center layout, more thermal and
+frame-rate work. Help is welcome — open an issue with the log from
+`tools/herolte-log-pull.py` and a photo of the screen.
+
+Credits: Mesa/Panfrost, [HakiOS](https://github.com/oosexgang/hackios-xnu-kernel)
+EAGL bridge (`gpu/hakios-gl`, see its NOTICE), Bergamota's EAGL shim
+(`gpu/eagl`), [ios-sweet](https://github.com/dipa-studio/ios-sweet),
+[syncmodz/ios-s9](https://github.com/syncmodz/ios-s9) and the LineageOS
+Exynos 8890 kernel for the hardware tables. ElleKit, Sileo and libkrw by their
+respective authors. iOS itself is Apple's and is not distributed here.
 
 Based on [orhunnx/ios-a5xelte](https://github.com/orhunnx/ios-a5xelte) (A5 2016)
 and its Redmi Note 10 Pro donor, documented below.
