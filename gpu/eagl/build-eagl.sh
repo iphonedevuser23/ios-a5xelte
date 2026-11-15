@@ -59,7 +59,8 @@ $CC -O2 -Wall -dynamiclib -o "$OUT/lib/libherosb.dylib" "$HERE/src/herosb.c" -in
 # libheroapp must be self-contained: it is inserted into arbitrary apps, and a @rpath dependency on libdrm never
 # resolved (no LC_RPATH reached the binary), so it failed to load everywhere. herodrm_log is a local stub now.
 $CC -O2 -Wall -dynamiclib -o "$OUT/lib/libheroapp.dylib" "$HERE/src/heroapp.c" -install_name @rpath/libheroapp.dylib \
-  -framework Foundation -framework UIKit -framework CoreGraphics -lobjc -Wl,-undefined,error
+  -framework Foundation -framework UIKit -framework CoreGraphics -framework ImageIO -framework IOSurface \
+  -lobjc -Wl,-undefined,error
 
 # The audio plug-in of mediaserverd, for hero-run to put in /System/Library/Audio/Plug-Ins/HAL/HakiosAudio.driver.
 mkdir -p "$OUT/audio"
@@ -74,3 +75,7 @@ for f in "$OUT/lib/libheroeagl.dylib" "$OUT/lib/libhakiosgl.dylib" "$OUT/lib/lib
 done
 # hero-run asks LaunchServices and installd to register the system bundles and the staged apps.
 codesign -s - -f --entitlements "$HERE/test/hero-run.entitlements" "$OUT/hero-run"
+
+# hero-oslog (dropped as hero-run's test): iOS's own log, read from logd's store, into the kernel's log.
+$CC -O2 -Wall -fobjc-arc -o "$OUT/hero-oslog" "$HERE/test/hero-oslog.m" -framework Foundation
+codesign -s - -f --entitlements "$HERE/test/hero-oslog.entitlements" "$OUT/hero-oslog"
