@@ -1,0 +1,57 @@
+name: walls
+# iOS 16's stock wallpapers as PNG for the drop zone (walls/N + walls/list), without building a whole root:
+# the phone has no HEVC decoder, so the HEIC pictures draw nothing; hero-run puts these PNGs over them.
+on:
+  workflow_dispatch:
+jobs:
+  walls:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the OS volume
+        run: |
+          set -euo pipefail
+          url=$(curl -sf "https://api.ipsw.me/v4/device/iPhone10,3?type=ipsw" | python3 -c "
+          import json, sys
+          fw = [f for f in json.load(sys.stdin)['firmwares'] if f['version'] == '16.7.16']
+          print(fw[0]['url'])")
+          echo "IPSW: $url"
+          mkdir -p ipsw
+          python3 tools/remotezip.py "$url" BuildManifest.plist ipsw
+          python3 - ipsw/BuildManifest.plist > members.txt <<'PY'
+          import plistlib, sys
+          m = plistlib.load(open(sys.argv[1], 'rb'))
+          ident = next(i for i in m['BuildIdentities']
+                       if i['Info']['DeviceClass'].lower() == 'd22ap' and 'Erase' in i['Info'].get('Variant', ''))
+          for key, name in {'OS': 'os', 'Cryptex1,SystemOS': 'systemos'}.items():
+              print(name, ident['Manifest'][key]['Info']['Path'])
+          PY
+          cat members.txt
+          while read -r name path; do
+            python3 tools/remotezip.py "$url" "$path" ipsw
+            mv "ipsw/$path" "ipsw/$name.${path##*.}"
+          done < members.txt
+          ls -la ipsw
+      - name: Wallpapers to PNG
+        run: |
+          set -euo pipefail
+          attach() { hdiutil attach -nobrowse -readonly -owners on "$1" | awk -F'\t' '/\/Volumes\// {print $NF}' | tail -1; }
+          mkdir -p fake
+          for d in ipsw/os.dmg ipsw/systemos.dmg; do
+            v=$(attach "$d")
+            echo "$d -> $v"
+            if [ -d "$v/Library/Wallpaper" ]; then
+              mkdir -p fake/Library && sudo cp -R "$v/Library/Wallpaper" fake/Library/
+              echo "wallpapers from $d: $(find "$v/Library/Wallpaper" -iname '*.heic' | wc -l) HEIC"
+            fi
+            hdiutil detach "$v" || true
+          done
+          sudo chown -R "$(id -u)" fake
+          bash tools/herolte-wallpaper-png.sh "$PWD/fake" "$PWD/wallout"
+          cat wallout/walls/list
+          tar -C wallout -czf walls.tar.gz walls
+          ls -la walls.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: walls
+          path: walls.tar.gz
