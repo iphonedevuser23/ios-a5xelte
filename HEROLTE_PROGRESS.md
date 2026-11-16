@@ -493,3 +493,10 @@ Para el 8890 (kernel de Samsung `drivers/video/fbdev/exynos/decon_8890`, GPL; co
 - hero-run: `com.apple.bluetoothd` leaves launchd's disabled list when the drop has `bt.level`.
 - ADT: `/arm-io/bluetooth` + `/arm-io/isp` added to the existing hero2lte ADTs (2 GB and 8 banks).
 - Sileo's icon went with the merged hero-run's `lsdb3.gone` (LaunchServices database rebuilt once; `uicache` had registered Sileo only in the old one): the drop's `test` runs `uicache -a` again.
+- **GPU rendering on hero2lte (2026-11-16):** backboardd had never used the Mali here. Samples symbolized (dsc-sym): every busy
+  backboardd thread in CoreAnimation's CPU renderer (`CA::OGL::SW::image_sampler`/`scanline`/`circle_sampler`, up to ~10
+  dispatch threads, 3.5-5 cores). Two causes: the drops shipped our old `libheroeagl.dylib` instead of `libhakiosgl.dylib`
+  under that name (upstream's howto), and `/private/var/herolte` was `drwxr--r--` so backboardd (uid 501, not sandboxed;
+  `bbprobe`) could not load anything from it (dyld policy 0x23 lets a failed insertion pass silently). With the folder 0755
+  and libhakiosgl: `EAGL shim loaded`, average 26.1 fps while active (11-20 before), frames 4+ ticks apart 7 % (44-79 %),
+  backboardd ~70 % CPU. Restarting backboardd to pick it up crashed SpringBoard once (ElleKit safe mode).
