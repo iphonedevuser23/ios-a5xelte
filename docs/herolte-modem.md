@@ -42,6 +42,16 @@ FirmWire material on Shannon.
   length, mseq, aseq, group, index, type). libsamsung-ipc boots older modems (XMM626x) but not the S7's;
   its message layer is the best public reference. Shannon may add or change messages.
 
+## Built (stage 2)
+
+- `0363`: `/dev/hakios-modem` (root, 0600): pread/pwrite of the shared memory, `HMIO_SMC` (0x82000700 with
+  x1 0/2/3/4, 0x82001014 ET_DAC_CAL), `HMIO_REG` (PMU CP registers by allow-list, mailbox, SYSRAM_ALIVE read).
+- `0364`: `HMIO_RADIO`: the RADIO partition, read only, through the UFS driver (RADIO is sda8, LUN 0).
+- NV data slot: the last 1024 blocks (4 MiB) of the drop zone, right below the persistent log. Block 0 is an
+  ASCII header `HERONV01 <size> <sha256>`, the file follows from the next block. Written once from TWRP, on the
+  phone, from EFS mounted read-only (`blockdev --setro`, `-o ro,noload`); `herolte-drop.py` keeps its package
+  below it. The loader keeps its working copy (RFS writes) under /private/var/herolte/modem/.
+
 ## Plan for this port
 
 - **Kernel (small, once):** a device node exposing only what a userland loader needs: map of the

@@ -115,6 +115,7 @@ DEV = '/dev/block/platform/155a0000.ufs/by-name/USERDATA'
 BLOCK = 4096
 LOG_BLOCKS = 1 + (4 << 20) // BLOCK
 DROP_BLOCKS = 32768
+NV_BLOCKS = 1024        # the last 4 MiB below the log: the modem's NV data slot (docs/herolte-modem.md)
 PREFIX = '/private/var/herolte/'
 
 
@@ -160,7 +161,7 @@ def pack(items):
         payload += b'\0' * (-len(payload) % 8)
         payload += data
         payload += b'\0' * (-len(payload) % 8)
-    if len(payload) > (DROP_BLOCKS - 1) * BLOCK:
+    if len(payload) > (DROP_BLOCKS - 1 - NV_BLOCKS) * BLOCK:
         sys.exit(f'package too large: {len(payload)} bytes')
     ident = int(time.time())
     header = struct.pack('<8sIIQQ', b'HERODRP1', 1, len(entries), len(payload), ident)

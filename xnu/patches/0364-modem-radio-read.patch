@@ -1,0 +1,165 @@
+diff --git a/bsd/dev/herolte_modem.c b/bsd/dev/herolte_modem.c
+index a30de92..37c8303 100644
+--- a/bsd/dev/herolte_modem.c
++++ b/bsd/dev/herolte_modem.c
+@@ -6,6 +6,7 @@
+  *   HMIO_SMC       the secure monitor calls the modem needs, allow-listed:
+  *                    0x82000700 with x1 = 0 (normal boot check), 2 (re-init), 3 (read CP_CTRL), 4 (write CP_CTRL)
+  *                    0x82001014 with x1 = 0, x2 = 0x2002 (ET_DAC_CAL read)
++ *   HMIO_RADIO     the RADIO partition (modem.bin), read only (0364)
+  *   HMIO_REG       32-bit registers: the PMU's CP registers (allow-listed offsets), the mailbox (mcu_ipc, 0x180
+  *                  bytes) and the 0x800 bytes of DRAM calibration in SYSRAM_ALIVE (read only)
+  *
+@@ -21,6 +22,7 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/locks.h>
++#include <kern/kalloc.h>
+ 
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+ 
+@@ -46,6 +48,15 @@ struct hm_reg {
+ };
+ #define HMIO_SMC        _IOWR('h', 1, struct hm_smc)
+ #define HMIO_REG        _IOWR('h', 2, struct hm_reg)
++struct hm_radio {
++	uint64_t block;         /* 4 KiB blocks into the RADIO partition */
++	uint64_t buffer;        /* user address, count * 4096 bytes */
++	uint32_t count;         /* at most 256 (1 MiB); 0 only asks for the size */
++	uint32_t pad;
++	uint64_t nblocks;       /* out: the partition's size in blocks */
++};
++#define HMIO_RADIO      _IOWR('h', 3, struct hm_radio)
++extern int herolte_ufs_read_radio(uint64_t block, uint32_t count, void *dst, uint64_t *nblocks);
+ 
+ static vm_offset_t hm_shm, hm_pmu, hm_mbox, hm_sysram;
+ static LCK_GRP_DECLARE(hm_lck_grp, "herolte_modem");
+@@ -173,6 +184,27 @@ hm_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unus
+ 		r->value = *reg;
+ 		return 0;
+ 	}
++	if (cmd == HMIO_RADIO) {
++		struct hm_radio *r = (struct hm_radio *)data;
++		if (r->count > 256) {
++			return EINVAL;
++		}
++		void *buf = NULL;
++		if (r->count) {
++			buf = kalloc_data((vm_size_t)r->count * 4096, Z_WAITOK);
++			if (!buf) {
++				return ENOMEM;
++			}
++		}
++		int error = herolte_ufs_read_radio(r->block, r->count, buf, &r->nblocks);
++		if (!error && r->count) {
++			error = copyout(buf, (user_addr_t)r->buffer, (size_t)r->count * 4096);
++		}
++		if (buf) {
++			kfree_data(buf, (vm_size_t)r->count * 4096);
++		}
++		return error;
++	}
+ 	return ENOTTY;
+ }
+ 
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index a591abc..50e0ac0 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -306,6 +306,96 @@ ufs_sync_cache(void)
+ 	return ufs_scsi(cdb, sizeof(cdb), 0, false);
+ }
+ 
++/* hero2lte (0364): the bounds of a GPT partition of LUN 0 by name, without touching su's own partition. */
++static int
++ufs_partition_bounds(const char *want, uint64_t *first_out, uint64_t *count_out)
++{
++	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
++	uint8_t lun = su.lun;
++	su.lun = 0;
++	int error = ufs_read_blocks(1, 1);
++	if (!error && memcmp(b, "EFI PART", 8) != 0) {
++		error = ENXIO;
++	}
++	uint64_t entry_lba = 0;
++	uint32_t nent = 0, esz = 0;
++	if (!error) {
++		memcpy(&entry_lba, b + 72, 8);
++		memcpy(&nent, b + 80, 4);
++		memcpy(&esz, b + 84, 4);
++		if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) {
++			error = ENXIO;
++		}
++	}
++	if (!error) {
++		error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
++	}
++	for (uint32_t i = 0; !error && i < nent; i++) {
++		const uint8_t *e = b + i * esz;
++		char name[37];
++		unsigned c;
++		for (c = 0; c < 36; c++) {
++			uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
++			if (ch == 0 || ch > 0x7f) {
++				break;
++			}
++			name[c] = (char)ch;
++		}
++		name[c] = 0;
++		if (strcmp(name, want) != 0) {
++			continue;
++		}
++		uint64_t first, last;
++		memcpy(&first, e + 32, 8);
++		memcpy(&last, e + 40, 8);
++		su.lun = lun;
++		if (last < first) {
++			return ENXIO;
++		}
++		*first_out = first;
++		*count_out = last - first + 1;
++		return 0;
++	}
++	su.lun = lun;
++	return error ? error : ENOENT;
++}
++
++/*
++ * hero2lte (0364): read-only access to the RADIO partition (the modem's firmware) for /dev/hakios-modem
++ * (bsd/dev/herolte_modem.c). Whole 4 KiB blocks from block `block`; only "RADIO" is allowed.
++ */
++int herolte_ufs_read_radio(uint64_t block, uint32_t count, void *dst, uint64_t *nblocks);
++int
++herolte_ufs_read_radio(uint64_t block, uint32_t count, void *dst, uint64_t *nblocks)
++{
++	static uint64_t radio_first, radio_n;
++	int error = 0;
++	if (!su.ready) {
++		return ENXIO;
++	}
++	lck_mtx_lock(&herolte_ufs_lock);
++	if (!radio_n) {
++		error = ufs_partition_bounds("RADIO", &radio_first, &radio_n);
++		printf("HEROLTE UFS: RADIO at block %llu, %llu MiB (%d)\n", radio_first, radio_n * UFS_BLOCK >> 20, error);
++	}
++	if (!error && nblocks) {
++		*nblocks = radio_n;
++	}
++	if (!error && count && (block >= radio_n || count > radio_n - block)) {
++		error = EINVAL;
++	}
++	for (uint32_t done = 0; !error && done < count;) {
++		uint32_t n = MIN(count - done, BOUNCE_SIZE / UFS_BLOCK);
++		error = ufs_read_blocks(radio_first + block + done, n);
++		if (!error) {
++			memcpy((uint8_t *)dst + (size_t)done * UFS_BLOCK, (const void *)(su.dma + DMA_BOUNCE), (size_t)n * UFS_BLOCK);
++			done += n;
++		}
++	}
++	lck_mtx_unlock(&herolte_ufs_lock);
++	return error;
++}
++
+ static int
+ ufs_find_partition(const char *want)
+ {
