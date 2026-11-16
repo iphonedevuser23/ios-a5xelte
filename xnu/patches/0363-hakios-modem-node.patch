@@ -1,0 +1,247 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index b7047c1..f53356b 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@ bsd/dev/herolte_touch.c			standard
+ bsd/dev/herolte_battery.c		standard
+ bsd/dev/herolte_gpu.c			standard
+ bsd/dev/herolte_drop.c			standard
++bsd/dev/herolte_modem.c		standard
+ bsd/dev/herolte_wifi.c			standard
+ bsd/dev/sweet_sta.c			standard
+ bsd/dev/sweet_net.c			standard
+diff --git a/bsd/dev/herolte_modem.c b/bsd/dev/herolte_modem.c
+new file mode 100644
+index 0000000..a30de92
+--- /dev/null
++++ b/bsd/dev/herolte_modem.c
+@@ -0,0 +1,208 @@
++/*
++ * hero2lte: /dev/hakios-modem, the few things a user-space loader needs to boot and talk to the Shannon 335 modem
++ * (docs/herolte-modem.md). Root only (0600). Nothing here starts the modem by itself.
++ *
++ *   pread/pwrite   the modem's shared memory, 0xF0000000 + 0x8800000 (outside every RAM bank of this port)
++ *   HMIO_SMC       the secure monitor calls the modem needs, allow-listed:
++ *                    0x82000700 with x1 = 0 (normal boot check), 2 (re-init), 3 (read CP_CTRL), 4 (write CP_CTRL)
++ *                    0x82001014 with x1 = 0, x2 = 0x2002 (ET_DAC_CAL read)
++ *   HMIO_REG       32-bit registers: the PMU's CP registers (allow-listed offsets), the mailbox (mcu_ipc, 0x180
++ *                  bytes) and the 0x800 bytes of DRAM calibration in SYSRAM_ALIVE (read only)
++ *
++ * Boot-arg heromodem=0: no node.
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/conf.h>
++#include <sys/uio.h>
++#include <sys/errno.h>
++#include <sys/ioccom.h>
++#include <miscfs/devfs/devfs.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <kern/locks.h>
++
++#if defined(ARM64_BOARD_CONFIG_HEROLTE)
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
++
++#define HM_SHM_PA        0xF0000000ULL
++#define HM_SHM_SIZE      0x8800000ULL
++#define HM_PMU_PA        0x105C0000ULL
++#define HM_MBOX_PA       0x10540000ULL
++#define HM_MBOX_SIZE     0x180u
++#define HM_SYSRAM_PA     0x020C7800ULL
++#define HM_SYSRAM_SIZE   0x800u
++
++struct hm_smc {
++	uint64_t x[4];          /* in: x0..x3; out: x0..x3 after the call */
++};
++struct hm_reg {
++	uint32_t block;         /* 0 PMU, 1 mailbox, 2 SYSRAM_ALIVE (read only) */
++	uint32_t write;         /* 0 read, 1 write */
++	uint32_t offset;
++	uint32_t value;
++};
++#define HMIO_SMC        _IOWR('h', 1, struct hm_smc)
++#define HMIO_REG        _IOWR('h', 2, struct hm_reg)
++
++static vm_offset_t hm_shm, hm_pmu, hm_mbox, hm_sysram;
++static LCK_GRP_DECLARE(hm_lck_grp, "herolte_modem");
++static LCK_MTX_DECLARE(hm_mtx, &hm_lck_grp);
++static unsigned hm_told;
++
++/* the PMU registers of the CP (drivers/misc/modem_v1/regs-pmu-exynos8890.h) */
++static const uint32_t hm_pmu_ok[] = {
++	0x0030, 0x0034, 0x0038, 0x003C, 0x0040, 0x0050, 0x0054, 0x0058, 0x005C, 0x0060, 0x0064, 0x0068, 0x006C,
++	0x0070, 0x0074, 0x0078, 0x0280, 0x1170, 0x11CC, 0x11D0, 0x11D4, 0x11D8,
++};
++
++static bool
++hm_map(void)
++{
++	if (hm_shm) {
++		return true;
++	}
++	hm_shm = ml_io_map_wcomb((vm_offset_t)HM_SHM_PA, (vm_size_t)HM_SHM_SIZE);
++	hm_pmu = ml_io_map((vm_offset_t)HM_PMU_PA, 0x2000);
++	hm_mbox = ml_io_map((vm_offset_t)HM_MBOX_PA, 0x1000);
++	hm_sysram = ml_io_map((vm_offset_t)(HM_SYSRAM_PA & ~0xfffULL), 0x1000);
++	printf("HEROLTE MODEM: shared memory 0x%llx+0x%llx mapped at %p\n", HM_SHM_PA, HM_SHM_SIZE, (void *)hm_shm);
++	return hm_shm != 0;
++}
++
++static uint64_t
++hm_smc_call(uint64_t *x)
++{
++	register uint64_t x0 __asm__("x0") = x[0];
++	register uint64_t x1 __asm__("x1") = x[1];
++	register uint64_t x2 __asm__("x2") = x[2];
++	register uint64_t x3 __asm__("x3") = x[3];
++	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : : "x4", "x5", "x6", "x7", "x8", "x9",
++	    "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	x[0] = x0;
++	x[1] = x1;
++	x[2] = x2;
++	x[3] = x3;
++	return x0;
++}
++
++static bool
++hm_smc_ok(const uint64_t *x)
++{
++	if (x[0] == 0x82000700ULL) {
++		return x[1] == 0 || x[1] == 2 || x[1] == 3 || x[1] == 4;
++	}
++	if (x[0] == 0x82001014ULL) {
++		return x[1] == 0 && x[2] == 0x2002;
++	}
++	return false;
++}
++
++static int
++hm_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
++{
++	return hm_map() ? 0 : ENXIO;
++}
++
++static int
++hm_close(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
++{
++	return 0;
++}
++
++static int
++hm_rw(__unused dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	off_t off = uio_offset(uio);
++	user_ssize_t n = uio_resid(uio);
++	if (off < 0 || (uint64_t)off >= HM_SHM_SIZE) {
++		return n > 0 ? EFAULT : 0;
++	}
++	if ((uint64_t)off + (uint64_t)n > HM_SHM_SIZE) {
++		n = (user_ssize_t)(HM_SHM_SIZE - (uint64_t)off);
++	}
++	int error = uiomove((caddr_t)(hm_shm + (vm_offset_t)off), (int)n, uio);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	return error;
++}
++
++static int
++hm_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p)
++{
++	if (cmd == HMIO_SMC) {
++		struct hm_smc *s = (struct hm_smc *)data;
++		if (!hm_smc_ok(s->x)) {
++			printf("HEROLTE MODEM: SMC 0x%llx x1 0x%llx refused\n", s->x[0], s->x[1]);
++			return EPERM;
++		}
++		uint64_t in0 = s->x[0], in1 = s->x[1], in2 = s->x[2], in3 = s->x[3];
++		lck_mtx_lock(&hm_mtx);
++		hm_smc_call(s->x);
++		lck_mtx_unlock(&hm_mtx);
++		if (hm_told++ < 64) {
++			printf("HEROLTE MODEM: SMC 0x%llx(0x%llx, 0x%llx, 0x%llx) -> 0x%llx 0x%llx 0x%llx 0x%llx\n", in0, in1, in2,
++			    in3, s->x[0], s->x[1], s->x[2], s->x[3]);
++		}
++		return 0;
++	}
++	if (cmd == HMIO_REG) {
++		struct hm_reg *r = (struct hm_reg *)data;
++		vm_offset_t base = 0;
++		if ((r->offset & 3) != 0) {
++			return EINVAL;
++		}
++		if (r->block == 0) {
++			for (unsigned i = 0; i < sizeof(hm_pmu_ok) / sizeof(hm_pmu_ok[0]) && !base; i++) {
++				base = hm_pmu_ok[i] == r->offset ? hm_pmu : 0;
++			}
++		} else if (r->block == 1 && r->offset < HM_MBOX_SIZE) {
++			base = hm_mbox;
++		} else if (r->block == 2 && r->offset < HM_SYSRAM_SIZE && !r->write) {
++			base = hm_sysram + (vm_offset_t)(HM_SYSRAM_PA & 0xfffULL);
++		}
++		if (!base) {
++			return EPERM;
++		}
++		volatile uint32_t *reg = (volatile uint32_t *)(base + r->offset);
++		if (r->write) {
++			*reg = r->value;
++			__asm__ volatile ("dsb sy" ::: "memory");
++		}
++		r->value = *reg;
++		return 0;
++	}
++	return ENOTTY;
++}
++
++static const struct cdevsw hm_cdevsw = {
++	.d_open = hm_open, .d_close = hm_close, .d_read = hm_rw, .d_write = hm_rw, .d_ioctl = hm_ioctl,
++	.d_stop = eno_stop, .d_reset = eno_reset, .d_select = eno_select, .d_mmap = eno_mmap,
++	.d_strategy = eno_strat, .d_type = 0
++};
++
++void herolte_modem_start(void);
++void
++herolte_modem_start(void)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("heromodem", &on, sizeof(on));
++	if (!on) {
++		return;
++	}
++	int major = cdevsw_add(-1, &hm_cdevsw);
++	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0600, "hakios-modem") == NULL) {
++		printf("HEROLTE MODEM: no /dev/hakios-modem\n");
++		return;
++	}
++	printf("HEROLTE MODEM: /dev/hakios-modem ready (shared memory, allow-listed SMCs, CP registers)\n");
++}
++
++#else
++void herolte_modem_start(void);
++void
++herolte_modem_start(void)
++{
++}
++#endif /* ARM64_BOARD_CONFIG_HEROLTE */
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 8692b66..b57c390 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1080,6 +1080,7 @@ bsd_init(void)
+ #if defined(ARM64_BOARD_CONFIG_HEROLTE)
+ extern void herolte_drop_apply(void);
+ extern void herolte_wifi_early(void);
++extern void herolte_modem_start(void);
+ #endif
+ 
+ void
+@@ -1113,6 +1114,8 @@ bsdinit_task(void)
+ 	herolte_drop_apply();
+ 	/* en0 for the Wi-Fi before wifid and configd look for it (bsd/dev/herolte_wifi.c) */
+ 	herolte_wifi_early();
++	/* /dev/hakios-modem for the modem loader (bsd/dev/herolte_modem.c); it starts nothing by itself */
++	herolte_modem_start();
+ #endif
+ 	load_init_program(p);
+ 	lock_trace = 1;
