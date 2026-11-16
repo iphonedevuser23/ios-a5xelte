@@ -1,0 +1,36 @@
+name: dsc-sym
+# Symbolize unslid shared-cache addresses from a crash line against the root's dyld shared cache.
+on:
+  workflow_dispatch:
+    inputs:
+      addrs:
+        description: "unslid addresses, space separated"
+        required: true
+      device:
+        default: "iPhone10,3"
+      version:
+        default: "16.7.16"
+jobs:
+  sym:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cache
+        run: |
+          brew install blacktop/tap/ipsw
+          url=$(curl -sf "https://api.ipsw.me/v4/device/${{ inputs.device }}?type=ipsw" | python3 -c "
+          import json, sys
+          fw = [f for f in json.load(sys.stdin)['firmwares'] if f['version'] == '${{ inputs.version }}']
+          print(fw[0]['url'])")
+          echo "IPSW: $url"
+          ipsw extract --remote --dyld -o dsc "$url" || { curl -sfL -o fw.ipsw "$url"; ipsw extract --dyld -o dsc fw.ipsw; rm -f fw.ipsw; }
+          find dsc -type f | head -40
+      - name: symbolize
+        run: |
+          d=$(dirname "$(find dsc -type f -name 'dyld_shared_cache_arm64' | head -1)")
+          python3 tools/herolte-dsc-sym.py "$d" build
+          python3 tools/herolte-dsc-sym.py "$d" ${{ inputs.addrs }}
+          main="$d/dyld_shared_cache_arm64"
+          for a in ${{ inputs.addrs }}; do ipsw dsc a2s "$main" "$a" 2>&1 | tail -1 || true; done
+          first=$(echo "${{ inputs.addrs }}" | cut -d' ' -f1)
+          ipsw dsc disass "$main" --vaddr $(python3 -c "print(hex($first-0x60))") --count 28 2>&1 | tail -40 || true
