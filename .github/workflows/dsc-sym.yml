@@ -23,7 +23,7 @@ jobs:
           sudo apt-get install -y -qq apfs-fuse || {
             sudo apt-get install -y -qq fuse3 libfuse3-dev zlib1g-dev libbz2-dev libattr1-dev cmake build-essential
             git clone -q --recursive https://github.com/sgan81/apfs-fuse.git /tmp/apfs-fuse
-            cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release >/dev/null
+            cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 >/dev/null
             make -C /tmp/apfs-fuse/build -j4 >/dev/null
             sudo install /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/apfs-fuse
           }
