@@ -8,12 +8,16 @@ env:
   VERSION: "16.7.16"
 jobs:
   sym:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: cache
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          brew install blacktop/tap/ipsw
+          gh release download -R blacktop/ipsw -p '*_linux_x86_64.tar.gz' -O ipsw.tgz
+          mkdir -p ipswbin && tar -xzf ipsw.tgz -C ipswbin && sudo install "$(find ipswbin -type f -name ipsw | head -1)" /usr/local/bin/ipsw
+          ipsw version
           url=$(curl -sf "https://api.ipsw.me/v4/device/$DEVICE?type=ipsw" | python3 -c "
           import json, sys
           fw = [f for f in json.load(sys.stdin)['firmwares'] if f['version'] == '$VERSION']
