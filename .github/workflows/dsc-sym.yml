@@ -8,33 +8,18 @@ env:
   VERSION: "16.7.16"
 jobs:
   sym:
-    runs-on: ubuntu-latest
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - name: cache
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download -R blacktop/ipsw -p 'ipsw_*_linux_x86_64.tar.gz' -O ipsw.tgz
-          mkdir -p ipswbin && tar -xzf ipsw.tgz -C ipswbin && sudo install "$(find ipswbin -type f -name ipsw | head -1)" /usr/local/bin/ipsw
-          ipsw version
-          # ipsw on Linux mounts the IPSW's APFS image with apfs-fuse
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq apfs-fuse || {
-            sudo apt-get install -y -qq fuse3 libfuse3-dev zlib1g-dev libbz2-dev libattr1-dev cmake build-essential
-            git clone -q --recursive https://github.com/sgan81/apfs-fuse.git /tmp/apfs-fuse
-            cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 >/dev/null
-            make -C /tmp/apfs-fuse/build -j4 >/dev/null
-            sudo install /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/apfs-fuse
-          }
-          which apfs-fuse
+          brew install blacktop/tap/ipsw
           url=$(curl -sf "https://api.ipsw.me/v4/device/$DEVICE?type=ipsw" | python3 -c "
           import json, sys
           fw = [f for f in json.load(sys.stdin)['firmwares'] if f['version'] == '$VERSION']
           print(fw[0]['url'])")
           echo "IPSW: $url"
-          sudo -E env PATH="$PATH" ipsw extract --remote --dyld -o dsc "$url" || { curl -sfL -o fw.ipsw "$url"; sudo -E env PATH="$PATH" ipsw extract --dyld -o dsc fw.ipsw; rm -f fw.ipsw; }
-          sudo chown -R "$(id -u)" dsc
+          ipsw extract --remote --dyld -o dsc "$url" || { curl -sfL -o fw.ipsw "$url"; ipsw extract --dyld -o dsc fw.ipsw; rm -f fw.ipsw; }
           find dsc -type f | head -40
       - name: symbolize
         run: |
