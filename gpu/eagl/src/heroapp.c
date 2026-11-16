@@ -305,13 +305,10 @@ install(void)
             break;
       }
    }
-   /* hero2lte: the daemons the kernel gives this library for their last words (heroappd: assetsd, mediaserverd) get the
-    * uncaught-exception line and nothing else. With the apps' hooks and ElleKit's tweak loader mediaserverd called a
-    * null pointer at every start (boot-2247416912: 90 times). */
-   if (strcmp(getprogname(), "mediaserverd") == 0 || strcmp(getprogname(), "assetsd") == 0) {
-      NSSetUncaughtExceptionHandler(uncaught);
-      return;
-   }
+   /* hero2lte: the daemons the kernel gives this library (heroappd: assetsd, mediaserverd) get the same hooks as the
+    * apps - without "no EAGLContext" mediaserverd's portrait-filter prewarm makes CoreImage call a null GL function
+    * (dsc-sym run 43865529863) - but not ElleKit's tweak loader. */
+   bool daemon = strcmp(getprogname(), "mediaserverd") == 0 || strcmp(getprogname(), "assetsd") == 0;
    if (strcmp(getprogname(), "CollectionsPoster") == 0) {
       pthread_t census;
       if (pthread_create(&census, NULL, heic_census_thread, NULL) == 0)
@@ -360,7 +357,7 @@ install(void)
 
    /* Bootstrap ElleKit's tweak loader in this app so installed tweaks (PreferenceLoader, etc.) load.
     * This port has no pspawn hook, so we load it directly. /private/var/herolte/tweaks.off disables it. */
-   if (access("/private/var/herolte/tweaks.off", F_OK) != 0) {
+   if (!daemon && access("/private/var/herolte/tweaks.off", F_OK) != 0) {
       dlopen("/var/jb/usr/lib/TweakLoader.dylib", RTLD_NOW);
    }
 }
