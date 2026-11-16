@@ -27,14 +27,28 @@
  * local stderr stub keeps libheroapp self-contained (system libraries only) so
  * it actually loads.
  */
-static void
+/* hero2lte: exported, so libnotefecam's dlsym(RTLD_DEFAULT, "herodrm_log") finds it; in mediaserverd (user mobile, no
+ * console) the lines also go to /private/var/tmp/herocam.log, which the drop zone's test script copies to the console. */
+__attribute__((visibility("default"))) void
 herodrm_log(const char *format, ...)
 {
+   extern const char *getprogname(void);
    va_list arguments;
    va_start(arguments, format);
    vfprintf(stderr, format, arguments);
    va_end(arguments);
    fputc('\n', stderr);
+   if (strcmp(getprogname(), "mediaserverd") == 0) {
+      FILE *f = fopen("/private/var/tmp/herocam.log", "a");
+      if (f) {
+         fprintf(f, "[%d] ", getpid());
+         va_start(arguments, format);
+         vfprintf(f, format, arguments);
+         va_end(arguments);
+         fputc('\n', f);
+         fclose(f);
+      }
+   }
 }
 
 extern void NSSetUncaughtExceptionHandler(void (*handler)(id));
@@ -267,15 +281,28 @@ install(void)
     * with the drop zone's cam.media = 1. hero-run makes /dev/hakios-camera (kern.notefe_cam=7) and restarts mediaserverd.
     */
    if (strcmp(getprogname(), "mediaserverd") == 0) {
+      /* hero2lte: mediaserverd is user mobile and cannot read /private/var/herolte; the drop zone's test script puts
+       * the library and the flag in /var/jb/usr/lib (as it does libheroapp itself). */
+      static const char *const dirs[] = { "/var/jb/usr/lib/", "/private/var/herolte/lib/" };
+      static const char *const flags[] = { "/var/jb/usr/lib/cam.media", "/private/var/herolte/cam.media" };
       char flag = '0';
-      int ff = open("/private/var/herolte/cam.media", O_RDONLY);
-      if (ff >= 0) {
-         (void)read(ff, &flag, 1);
-         close(ff);
+      for (int i = 0; i < 2 && flag != '1'; i++) {
+         int ff = open(flags[i], O_RDONLY);
+         if (ff >= 0) {
+            (void)read(ff, &flag, 1);
+            close(ff);
+         }
       }
-      if (flag == '1' && access("/private/var/herolte/lib/libnotefecam.dylib", F_OK) == 0) {
-         void *cam = dlopen("/private/var/herolte/lib/libnotefecam.dylib", RTLD_NOW);
-         herodrm_log("mediaserverd: libnotefecam %s", cam ? "loaded" : dlerror());
+      herodrm_log("mediaserverd: libheroapp here, cam.media %c", flag);
+      for (int i = 0; i < 2 && flag == '1'; i++) {
+         char path[128];
+         snprintf(path, sizeof(path), "%slibnotefecam.dylib", dirs[i]);
+         if (access(path, R_OK) != 0)
+            continue;
+         void *cam = dlopen(path, RTLD_NOW);
+         herodrm_log("mediaserverd: %s %s", path, cam ? "loaded" : dlerror());
+         if (cam)
+            break;
       }
    }
    if (strcmp(getprogname(), "CollectionsPoster") == 0) {
