@@ -305,6 +305,13 @@ install(void)
             break;
       }
    }
+   /* hero2lte: the daemons the kernel gives this library for their last words (heroappd: assetsd, mediaserverd) get the
+    * uncaught-exception line and nothing else. With the apps' hooks and ElleKit's tweak loader mediaserverd called a
+    * null pointer at every start (boot-2247416912: 90 times). */
+   if (strcmp(getprogname(), "mediaserverd") == 0 || strcmp(getprogname(), "assetsd") == 0) {
+      NSSetUncaughtExceptionHandler(uncaught);
+      return;
+   }
    if (strcmp(getprogname(), "CollectionsPoster") == 0) {
       pthread_t census;
       if (pthread_create(&census, NULL, heic_census_thread, NULL) == 0)
