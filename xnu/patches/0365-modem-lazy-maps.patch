@@ -1,0 +1,81 @@
+diff --git a/bsd/dev/herolte_modem.c b/bsd/dev/herolte_modem.c
+index 37c8303..2b14a40 100644
+--- a/bsd/dev/herolte_modem.c
++++ b/bsd/dev/herolte_modem.c
+@@ -69,18 +69,27 @@ static const uint32_t hm_pmu_ok[] = {
+ 	0x0070, 0x0074, 0x0078, 0x0280, 0x1170, 0x11CC, 0x11D0, 0x11D4, 0x11D8,
+ };
+ 
+-static bool
+-hm_map(void)
++/*
++ * (0365) Each region is mapped the first time it is used, not at open: opening the node reset the phone once
++ * (herocbd's step log, boot-2901212715), and this tells which mapping or first access does it.
++ */
++static vm_offset_t
++hm_region(int which)
+ {
+-	if (hm_shm) {
+-		return true;
++	lck_mtx_lock(&hm_mtx);
++	if (which == 0 && !hm_shm) {
++		printf("HEROLTE MODEM: mapping the shared memory\n");
++		hm_shm = ml_io_map_wcomb((vm_offset_t)HM_SHM_PA, (vm_size_t)HM_SHM_SIZE);
++	} else if (which == 1 && !hm_pmu) {
++		hm_pmu = ml_io_map((vm_offset_t)HM_PMU_PA, 0x2000);
++	} else if (which == 2 && !hm_mbox) {
++		hm_mbox = ml_io_map((vm_offset_t)HM_MBOX_PA, 0x1000);
++	} else if (which == 3 && !hm_sysram) {
++		hm_sysram = ml_io_map((vm_offset_t)(HM_SYSRAM_PA & ~0xfffULL), 0x1000);
+ 	}
+-	hm_shm = ml_io_map_wcomb((vm_offset_t)HM_SHM_PA, (vm_size_t)HM_SHM_SIZE);
+-	hm_pmu = ml_io_map((vm_offset_t)HM_PMU_PA, 0x2000);
+-	hm_mbox = ml_io_map((vm_offset_t)HM_MBOX_PA, 0x1000);
+-	hm_sysram = ml_io_map((vm_offset_t)(HM_SYSRAM_PA & ~0xfffULL), 0x1000);
+-	printf("HEROLTE MODEM: shared memory 0x%llx+0x%llx mapped at %p\n", HM_SHM_PA, HM_SHM_SIZE, (void *)hm_shm);
+-	return hm_shm != 0;
++	vm_offset_t v = which == 0 ? hm_shm : which == 1 ? hm_pmu : which == 2 ? hm_mbox : hm_sysram;
++	lck_mtx_unlock(&hm_mtx);
++	return v;
+ }
+ 
+ static uint64_t
+@@ -114,7 +123,7 @@ hm_smc_ok(const uint64_t *x)
+ static int
+ hm_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+ {
+-	return hm_map() ? 0 : ENXIO;
++	return 0;
+ }
+ 
+ static int
+@@ -134,7 +143,11 @@ hm_rw(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+ 	if ((uint64_t)off + (uint64_t)n > HM_SHM_SIZE) {
+ 		n = (user_ssize_t)(HM_SHM_SIZE - (uint64_t)off);
+ 	}
+-	int error = uiomove((caddr_t)(hm_shm + (vm_offset_t)off), (int)n, uio);
++	vm_offset_t shm = hm_region(0);
++	if (!shm) {
++		return ENXIO;
++	}
++	int error = uiomove((caddr_t)(shm + (vm_offset_t)off), (int)n, uio);
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	return error;
+ }
+@@ -166,12 +179,13 @@ hm_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unus
+ 		}
+ 		if (r->block == 0) {
+ 			for (unsigned i = 0; i < sizeof(hm_pmu_ok) / sizeof(hm_pmu_ok[0]) && !base; i++) {
+-				base = hm_pmu_ok[i] == r->offset ? hm_pmu : 0;
++				base = hm_pmu_ok[i] == r->offset ? hm_region(1) : 0;
+ 			}
+ 		} else if (r->block == 1 && r->offset < HM_MBOX_SIZE) {
+-			base = hm_mbox;
++			base = hm_region(2);
+ 		} else if (r->block == 2 && r->offset < HM_SYSRAM_SIZE && !r->write) {
+-			base = hm_sysram + (vm_offset_t)(HM_SYSRAM_PA & 0xfffULL);
++			vm_offset_t v = hm_region(3);
++			base = v ? v + (vm_offset_t)(HM_SYSRAM_PA & 0xfffULL) : 0;
+ 		}
+ 		if (!base) {
+ 			return EPERM;

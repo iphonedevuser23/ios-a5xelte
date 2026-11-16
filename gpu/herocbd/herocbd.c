@@ -45,6 +45,26 @@ struct hm_radio { uint64_t block, buffer; uint32_t count, pad; uint64_t nblocks;
 #define CP_START     (1u << 3)
 
 static int md = -1;
+static int stepfd = -1;
+
+/* hero2lte: every step also into WORKDIR/herocbd.log, synced, before it runs: a hard reset leaves the last one */
+static void
+step(const char *what)
+{
+	if (stepfd < 0) {
+		mkdir(WORKDIR, 0700);
+		stepfd = open(WORKDIR "/herocbd.log", O_WRONLY | O_CREAT | O_APPEND, 0600);
+	}
+	if (stepfd >= 0) {
+		char line[256];
+		int n = snprintf(line, sizeof(line), "%ld %s\n", (long)time(NULL), what);
+		write(stepfd, line, (size_t)n);
+		fsync(stepfd);
+	}
+	printf("herocbd: step: %s\n", what);
+	fflush(stdout);
+	usleep(200000);
+}
 
 static void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void
@@ -100,6 +120,9 @@ radio_read(uint64_t byte_off, void *dst, size_t len, uint64_t *nblocks)
 static uint64_t
 smc(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t *x2_out)
 {
+	char what[96];
+	snprintf(what, sizeof(what), "SMC 0x%llx x1=%llu x2=0x%llx x3=0x%llx", x0, x1, x2, x3);
+	step(what);
 	struct hm_smc s = { { x0, x1, x2, x3 } };
 	if (ioctl(md, HMIO_SMC, &s) != 0) {
 		say("SMC 0x%llx/%llu refused: %s", x0, x1, strerror(errno));
@@ -117,6 +140,12 @@ static uint64_t cp_write(int reg, uint32_t v) { return smc(SMC_CP, 4, v, (uint64
 static uint32_t
 reg_rw(uint32_t block, uint32_t off, int write, uint32_t v)
 {
+	static int told;
+	if (told++ < 8) {
+		char what[64];
+		snprintf(what, sizeof(what), "register block %u offset 0x%x %s", block, off, write ? "write" : "read");
+		step(what);
+	}
 	struct hm_reg r = { block, (uint32_t)write, off, v };
 	if (ioctl(md, HMIO_REG, &r) != 0) {
 		say("register %u/0x%x: %s", block, off, strerror(errno));
@@ -279,23 +308,28 @@ main(int argc, char **argv)
 {
 	const char *what = argc > 1 ? argv[1] : "toc";
 	say("%s (pid %d)", what, getpid());
+	step("open /dev/hakios-modem (maps the shared memory, PMU, mailbox and SYSRAM)");
 	md = open("/dev/hakios-modem", O_RDWR);
+	step("opened");
 	if (md < 0) {
 		say("/dev/hakios-modem: %s (kernel without 0363/0364?)", strerror(errno));
 		return 1;
 	}
+	step("NV");
 	int nv_ok = nv_prepare() == 0;
 	if (!strcmp(what, "nv")) {
 		return nv_ok ? 0 : 1;
 	}
 	struct toc t[16];
 	int n = 0;
+	step("RADIO TOC");
 	if (read_toc(t, &n) != 0) {
 		say("RADIO: no usable TOC");
 		return 1;
 	}
 	say("CP_CTRL_NS 0x%x CP_CTRL_S 0x%x, mailbox cp_status 0x%x", cp_read(CP_CTRL_NS), cp_read(CP_CTRL_S), mbox_get(5));
 	if (strcmp(what, "boot") != 0) {
+		step("done (toc)");
 		return 0;
 	}
 	if (!nv_ok) {
