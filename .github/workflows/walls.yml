@@ -3,6 +3,8 @@ name: walls
 # the phone has no HEVC decoder, so the HEIC pictures draw nothing; hero-run puts these PNGs over them.
 on:
   workflow_dispatch:
+  push:
+    paths: [".github/workflows/walls.yml"]
 jobs:
   walls:
     runs-on: macos-15-intel
