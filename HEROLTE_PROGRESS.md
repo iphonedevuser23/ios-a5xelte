@@ -500,3 +500,7 @@ Para el 8890 (kernel de Samsung `drivers/video/fbdev/exynos/decon_8890`, GPL; co
   `bbprobe`) could not load anything from it (dyld policy 0x23 lets a failed insertion pass silently). With the folder 0755
   and libhakiosgl: `EAGL shim loaded`, average 26.1 fps while active (11-20 before), frames 4+ ticks apart 7 % (44-79 %),
   backboardd ~70 % CPU. Restarting backboardd to pick it up crashed SpringBoard once (ElleKit safe mode).
+- **Modem, stage 1 (research, 2026-11-16):** `docs/herolte-modem.md`. Shannon 335 in the SoC, shared memory
+  `0xF0000000`+136 MiB (already outside the RAM banks), mailbox `0x10540000`, CP power via SMC `0x82000700`; boot as
+  in tonyg's `qnd_cbd.py` (RADIO TOC -> BOOT/MAIN, NV from `/efs/nv_data.bin`, security requests, handshake).
+  Plan: a small kernel node (window, mailbox, allow-listed SMCs) + a userland loader; EFS only as an on-phone copy.
